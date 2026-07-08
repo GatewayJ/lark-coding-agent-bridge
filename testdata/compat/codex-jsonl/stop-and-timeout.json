@@ -1,0 +1,39 @@
+{
+  "name": "stop-and-timeout",
+  "steps": [
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "thread.started",
+        "thread_id": "thread-stop"
+      },
+      "events": [
+        {
+          "type": "system",
+          "threadId": "thread-stop"
+        }
+      ],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "finish",
+      "reason": "interrupted",
+      "events": [
+        {
+          "type": "done",
+          "threadId": "thread-stop",
+          "terminationReason": "interrupted"
+        }
+      ],
+      "terminalEmitted": true,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    }
+  ]
+}

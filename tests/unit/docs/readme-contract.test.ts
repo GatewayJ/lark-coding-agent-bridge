@@ -1,5 +1,9 @@
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+
+const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
 
 describe('README runtime contract', () => {
   it('documents maintained runtime surfaces in user-visible docs', async () => {
@@ -26,8 +30,65 @@ describe('README runtime contract', () => {
       'pnpm test',
       'pnpm typecheck',
       'pnpm build',
+      'pnpm test:go',
+      'pnpm test:go:race',
+      'pnpm test:go:cross',
+      'pkg/bridge',
+      'docs/go-sdk-usage.md',
+      'docs/pkg/bridge.md',
     ]) {
       expect(docs).toContain(phrase);
+    }
+  });
+
+  it('documents canonical Go SDK public API names', async () => {
+    const docs = await readSDKDocs();
+
+    for (const phrase of [
+      'BootstrapProfileConfig',
+      'StartProfileService',
+      'NewProfileServiceController',
+      'BuildLarkCLISourceProjection',
+      'WriteLarkCLISourceProjection',
+      'PreflightLarkCLI',
+      'bridge.New',
+      'CLI-equivalent',
+    ]) {
+      expect(docs).toContain(phrase);
+    }
+    for (const phrase of [
+      'BuildLarkCliSourceProjection',
+      'WriteLarkCliSourceProjection',
+      'PreflightLarkCli',
+    ]) {
+      expect(docs).not.toContain(phrase);
+    }
+  });
+
+  it('keeps README links aligned and covered by npm package files', async () => {
+    const [en, zh, packageRaw] = await Promise.all([
+      readFile(new URL('../../../README.md', import.meta.url), 'utf8'),
+      readFile(new URL('../../../README.zh.md', import.meta.url), 'utf8'),
+      readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
+    ]);
+    const packageJSON = JSON.parse(packageRaw) as { files?: string[] };
+    const packageFiles = packageJSON.files ?? [];
+
+    expect(packageFiles).toEqual(expect.arrayContaining([
+      'docs',
+      'assets',
+      'README.md',
+      'README.zh.md',
+      'LICENSE',
+    ]));
+
+    const enTargets = collectLocalReferences(en).filter((target) => target !== 'README.zh.md');
+    const zhTargets = collectLocalReferences(zh).filter((target) => target !== 'README.md');
+    expect(enTargets).toEqual(zhTargets);
+
+    for (const target of new Set([...enTargets, ...zhTargets])) {
+      await expectLocalFile(target);
+      expect(isPackaged(target, packageFiles)).toBe(true);
     }
   });
 
@@ -99,4 +160,59 @@ async function readDocs(): Promise<string> {
     readFile(new URL('../../../README.zh.md', import.meta.url), 'utf8'),
   ]);
   return `${en}\n${zh}`;
+}
+
+async function readSDKDocs(): Promise<string> {
+  const [usage, facade] = await Promise.all([
+    readFile(new URL('../../../docs/go-sdk-usage.md', import.meta.url), 'utf8'),
+    readFile(new URL('../../../docs/pkg/bridge.md', import.meta.url), 'utf8'),
+  ]);
+  return `${usage}\n${facade}`;
+}
+
+function collectLocalReferences(markdown: string): string[] {
+  const targets = new Set<string>();
+  for (const match of markdown.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
+    const rawTarget = match[1];
+    if (!rawTarget) {
+      continue;
+    }
+    const target = normalizeLocalTarget(rawTarget);
+    if (target) {
+      targets.add(target);
+    }
+  }
+  for (const match of markdown.matchAll(/src="([^"]+)"/g)) {
+    const rawTarget = match[1];
+    if (!rawTarget) {
+      continue;
+    }
+    const target = normalizeLocalTarget(rawTarget);
+    if (target) {
+      targets.add(target);
+    }
+  }
+  return [...targets].sort();
+}
+
+function normalizeLocalTarget(target: string): string | undefined {
+  if (/^(?:https?:|mailto:|#)/.test(target)) {
+    return undefined;
+  }
+  const withoutFragment = target.split('#')[0]?.split('?')[0];
+  if (!withoutFragment) {
+    return undefined;
+  }
+  return withoutFragment.replace(/^\.\//, '');
+}
+
+async function expectLocalFile(target: string): Promise<void> {
+  await expect(access(path.join(repoRoot, target))).resolves.toBeUndefined();
+}
+
+function isPackaged(target: string, packageFiles: string[]): boolean {
+  return packageFiles.some((entry) => {
+    const normalized = entry.replace(/\/$/, '');
+    return target === normalized || target.startsWith(`${normalized}/`);
+  });
 }

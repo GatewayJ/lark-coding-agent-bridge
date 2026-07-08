@@ -1,0 +1,49 @@
+{
+  "name": "turn-failed-terminal",
+  "steps": [
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "turn.failed",
+        "error": {
+          "message": "command denied"
+        }
+      },
+      "events": [
+        {
+          "type": "error",
+          "message": "command denied",
+          "terminationReason": "failed"
+        }
+      ],
+      "terminalEmitted": true,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "error",
+        "message": "late raw error"
+      },
+      "events": [],
+      "terminalEmitted": true,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "finish",
+      "reason": "failed",
+      "events": [],
+      "terminalEmitted": true,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    }
+  ]
+}

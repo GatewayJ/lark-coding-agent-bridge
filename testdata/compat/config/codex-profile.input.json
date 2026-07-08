@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 2,
+  "activeProfile": "codex",
+  "preferences": {},
+  "profiles": {
+    "codex": {
+      "schemaVersion": 2,
+      "agentKind": "codex",
+      "accounts": {
+        "app": {
+          "id": "cli_codex",
+          "secret": {
+            "source": "env",
+            "id": "LARK_APP_SECRET"
+          },
+          "tenant": "lark"
+        }
+      },
+      "preferences": {
+        "messageReply": "card",
+        "showToolCalls": false,
+        "access": {
+          "allowedUsers": [
+            "legacy-user"
+          ]
+        },
+        "requireMentionInGroup": false
+      },
+      "access": {
+        "allowedUsers": [
+          "ou_user",
+          7,
+          "ou_admin"
+        ],
+        "allowedChats": [
+          "oc_chat"
+        ],
+        "admins": [
+          "ou_admin"
+        ]
+      },
+      "workspaces": {
+        "default": "  /workspace/project  ",
+        "trustedRoots": [
+          "/legacy"
+        ]
+      },
+      "sandbox": {
+        "defaultMode": "read-only",
+        "maxMode": "workspace-write"
+      },
+      "permissions": {
+        "defaultAccess": "workspace",
+        "maxAccess": "full"
+      },
+      "codex": {
+        "binaryPath": "/usr/local/bin/codex",
+        "version": "1.2.3",
+        "inheritCodexHome": false,
+        "ignoreUserConfig": true
+      },
+      "attachments": {
+        "maxCount": 3,
+        "maxBytes": 4096,
+        "imageMaxBytes": -1
+      },
+      "comments": {
+        "legacy": true
+      },
+      "larkCli": {
+        "identityPreset": "user-default",
+        "localUserImport": {
+          "status": "imported",
+          "attemptedAt": "2026-07-01T00:00:00.000Z",
+          "importedAt": "2026-07-01T00:00:01.000Z"
+        }
+      }
+    }
+  }
+}

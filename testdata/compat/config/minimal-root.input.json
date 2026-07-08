@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "activeProfile": "claude",
+  "preferences": {
+    "ignored": true
+  },
+  "profiles": {
+    "claude": {
+      "schemaVersion": 2,
+      "agentKind": "claude",
+      "accounts": {
+        "app": {
+          "id": "cli_minimal",
+          "secret": "plain-secret",
+          "tenant": "feishu"
+        }
+      }
+    }
+  }
+}

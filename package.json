@@ -6,12 +6,12 @@
   "packageManager": "pnpm@10.33.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zarazhangrui/feishu-claude-code-bridge.git"
+    "url": "git+https://github.com/zarazhangrui/lark-coding-agent-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/zarazhangrui/feishu-claude-code-bridge/issues"
+    "url": "https://github.com/zarazhangrui/lark-coding-agent-bridge/issues"
   },
-  "homepage": "https://github.com/zarazhangrui/feishu-claude-code-bridge#readme",
+  "homepage": "https://github.com/zarazhangrui/lark-coding-agent-bridge#readme",
   "bin": {
     "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
   },
@@ -24,6 +24,9 @@
   "files": [
     "dist",
     "bin",
+    "docs",
+    "scripts",
+    "assets",
     "README.md",
     "README.zh.md",
     "LICENSE"
@@ -33,13 +36,22 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:go:mod": "go mod tidy -diff",
+    "test:go": "go test -mod=readonly ./...",
+    "test:go:race": "go test -mod=readonly -race ./internal/app/runtimecoord ./pkg/bridge ./internal/adapters/lark ./internal/app/service",
+    "test:go:vet": "go vet -mod=readonly ./...",
+    "test:go:cross": "node scripts/go-cross-check.mjs",
+    "test:go:tracked": "node scripts/go-sdk-release-check.mjs --tracked",
+    "test:go:head": "node scripts/go-sdk-release-check.mjs --head",
+    "test:go:published": "node scripts/go-sdk-release-check.mjs --published",
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "test:process": "vitest run tests/process --passWithNoTests",
-    "ci:local": "git diff --check && pnpm test && pnpm typecheck && pnpm build",
-    "ci:platform": "pnpm test && pnpm typecheck && pnpm build",
+    "ci:local": "git diff --check && pnpm test && pnpm typecheck && pnpm build && pnpm test:go:mod && pnpm test:go && pnpm test:go:race && pnpm test:go:vet && pnpm test:go:cross",
+    "ci:platform": "pnpm test && pnpm typecheck && pnpm build && pnpm test:go:mod && pnpm test:go && pnpm test:go:race && pnpm test:go:vet && pnpm test:go:cross",
+    "release:check": "pnpm ci:local && pnpm test:go:tracked",
     "prepare": "npm run build",
-    "prepublishOnly": "pnpm typecheck && pnpm build"
+    "prepublishOnly": "pnpm release:check"
   },
   "dependencies": {
     "@clack/prompts": "^1.4.0",

@@ -1,0 +1,39 @@
+{
+  "name": "timeout",
+  "steps": [
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "thread.started",
+        "thread_id": "thread-timeout"
+      },
+      "events": [
+        {
+          "type": "system",
+          "threadId": "thread-timeout"
+        }
+      ],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "finish",
+      "reason": "timeout",
+      "events": [
+        {
+          "type": "done",
+          "threadId": "thread-timeout",
+          "terminationReason": "timeout"
+        }
+      ],
+      "terminalEmitted": true,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    }
+  ]
+}

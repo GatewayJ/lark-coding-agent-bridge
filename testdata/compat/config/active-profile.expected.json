@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 2,
+  "activeProfile": "claude",
+  "preferences": {},
+  "secrets": {
+    "defaults": {
+      "env": "default"
+    },
+    "providers": {
+      "default": {
+        "source": "env",
+        "allowlist": [
+          "LARK_APP_SECRET"
+        ]
+      }
+    }
+  },
+  "profiles": {
+    "claude": {
+      "schemaVersion": 2,
+      "agentKind": "claude",
+      "accounts": {
+        "app": {
+          "id": "cli_claude",
+          "secret": "${LARK_APP_SECRET}",
+          "tenant": "feishu"
+        }
+      },
+      "preferences": {},
+      "access": {
+        "allowedUsers": [],
+        "allowedChats": [],
+        "admins": [],
+        "requireMentionInGroup": true
+      },
+      "workspaces": {},
+      "sandbox": {
+        "default": "danger-full-access",
+        "max": "danger-full-access",
+        "defaultMode": "danger-full-access",
+        "maxMode": "danger-full-access"
+      },
+      "permissions": {
+        "defaultAccess": "full",
+        "maxAccess": "full"
+      },
+      "permissionSource": "default",
+      "attachments": {
+        "maxCount": 10,
+        "maxBytes": 104857600,
+        "maxFileBytes": 26214400,
+        "imageMaxBytes": 26214400,
+        "cacheTtlMs": 86400000,
+        "cacheMaxBytes": 536870912
+      },
+      "comments": {},
+      "larkCli": {
+        "identityPreset": "bot-only"
+      }
+    },
+    "codex": {
+      "schemaVersion": 2,
+      "agentKind": "codex",
+      "accounts": {
+        "app": {
+          "id": "cli_codex_active",
+          "secret": "${LARK_APP_SECRET}",
+          "tenant": "feishu"
+        }
+      },
+      "preferences": {},
+      "access": {
+        "allowedUsers": [],
+        "allowedChats": [],
+        "admins": [],
+        "requireMentionInGroup": true
+      },
+      "workspaces": {},
+      "sandbox": {
+        "default": "danger-full-access",
+        "max": "danger-full-access",
+        "defaultMode": "danger-full-access",
+        "maxMode": "danger-full-access"
+      },
+      "permissions": {
+        "defaultAccess": "full",
+        "maxAccess": "full"
+      },
+      "permissionSource": "default",
+      "codex": {
+        "binaryPath": "codex",
+        "inheritCodexHome": true,
+        "ignoreUserConfig": false,
+        "ignoreRules": true
+      },
+      "attachments": {
+        "maxCount": 10,
+        "maxBytes": 104857600,
+        "maxFileBytes": 26214400,
+        "imageMaxBytes": 26214400,
+        "cacheTtlMs": 86400000,
+        "cacheMaxBytes": 536870912
+      },
+      "comments": {},
+      "larkCli": {
+        "identityPreset": "bot-only"
+      }
+    }
+  }
+}

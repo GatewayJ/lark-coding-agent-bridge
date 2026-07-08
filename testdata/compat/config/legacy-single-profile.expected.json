@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 2,
+  "activeProfile": "claude",
+  "preferences": {},
+  "secrets": {
+    "providers": {
+      "bridge": {
+        "source": "exec",
+        "command": "/opt/bridge/secrets-getter",
+        "args": []
+      }
+    },
+    "defaults": {
+      "exec": "bridge"
+    }
+  },
+  "migrations": {
+    "permissionDefaultsV1": [
+      "claude"
+    ]
+  },
+  "profiles": {
+    "claude": {
+      "schemaVersion": 2,
+      "agentKind": "claude",
+      "accounts": {
+        "app": {
+          "id": "cli_legacy",
+          "secret": {
+            "source": "exec",
+            "provider": "bridge",
+            "id": "app-cli_legacy"
+          },
+          "tenant": "feishu"
+        }
+      },
+      "preferences": {
+        "messageReplyMigrated": false,
+        "showToolCalls": false,
+        "cotMessages": "simple",
+        "messageReply": "text"
+      },
+      "access": {
+        "allowedUsers": [
+          "ou_legacy"
+        ],
+        "allowedChats": [
+          "oc_legacy"
+        ],
+        "admins": [
+          "ou_admin"
+        ],
+        "requireMentionInGroup": false
+      },
+      "workspaces": {},
+      "sandbox": {
+        "default": "danger-full-access",
+        "max": "danger-full-access",
+        "defaultMode": "danger-full-access",
+        "maxMode": "danger-full-access"
+      },
+      "permissions": {
+        "defaultAccess": "full",
+        "maxAccess": "full"
+      },
+      "permissionSource": "permissions",
+      "attachments": {
+        "maxCount": 10,
+        "maxBytes": 104857600,
+        "maxFileBytes": 26214400,
+        "imageMaxBytes": 26214400,
+        "cacheTtlMs": 86400000,
+        "cacheMaxBytes": 536870912
+      },
+      "comments": {},
+      "larkCli": {
+        "identityPreset": "bot-only"
+      }
+    }
+  }
+}

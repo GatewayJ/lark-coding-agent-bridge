@@ -1,0 +1,74 @@
+{
+  "name": "raw-error-recovers",
+  "steps": [
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "thread.started",
+        "thread_id": "thread-retry"
+      },
+      "events": [
+        {
+          "type": "system",
+          "threadId": "thread-retry"
+        }
+      ],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "error",
+        "error": {
+          "message": "Reconnecting... 2/5 (timeout waiting for child process to exit)"
+        }
+      },
+      "events": [],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "agent_message",
+        "message": "after retry"
+      },
+      "events": [
+        {
+          "type": "text",
+          "delta": "after retry"
+        }
+      ],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "turn.completed"
+      },
+      "events": [
+        {
+          "type": "done",
+          "threadId": "thread-retry",
+          "terminationReason": "normal"
+        }
+      ],
+      "terminalEmitted": true,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    }
+  ]
+}

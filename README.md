@@ -303,6 +303,10 @@ Each line carries `chatId` (group / DM id) and `senderId` (user `open_id`). Afte
 
 Cloud-doc comments do not need a separate workspace binding or document allowlist. In supported document comments, mention the bot and the bridge replies in the same thread. Comment runs reuse the document session key and fall back to the user home directory when no document cwd was previously recorded.
 
+## Go SDK
+
+The Go SDK surface lives in `pkg/bridge` and is intended for embedding the same bridge behavior in another Go program. See [docs/go-sdk-usage.md](docs/go-sdk-usage.md) for production CLI-equivalent profile/service startup, in-process bridge embedding, custom runtime adapters, lark-cli compatibility helpers, card rendering, telemetry, and verification commands. The public facade reference is in [docs/pkg/bridge.md](docs/pkg/bridge.md).
+
 ## FAQ
 
 **The bot stays silent or the local CLI never replies.** Usually the local `claude` or `codex` CLI is not logged in, or the current session points to a working directory that no longer exists. Send `/status` to inspect; `/new` often fixes it by starting a fresh session.
@@ -319,21 +323,27 @@ Local checks:
 pnpm test
 pnpm typecheck
 pnpm build
+pnpm test:go
+pnpm test:go:race
+pnpm test:go:cross
+pnpm test:go:tracked
+pnpm test:go:head
 ```
 
-`pnpm test` includes unit, integration, and process-level adapter tests. CI runs on macOS, Ubuntu, and Windows with `pnpm install --frozen-lockfile`, `pnpm test`, `pnpm typecheck`, and `pnpm build`.
+`pnpm test` includes unit, integration, and process-level adapter tests. `pnpm test:go` runs `go test ./...`, including the external Go SDK smoke test. `pnpm test:go:race` runs the race-sensitive Go SDK/runtime/Lark/service packages. `pnpm test:go:cross` cross-compiles the Go CLI entrypoint for Windows, macOS, and Linux. CI runs the same Node, Go, race, and cross-compile gates on macOS, Ubuntu, and Windows.
+`pnpm test:go:tracked` is part of `pnpm release:check` and fails if required Go SDK files are not tracked by Git. After committing, run `pnpm test:go:head` before tagging. After pushing a release commit or tag, set `GO_SDK_IMPORT_VERSION=<commit-or-tag>` and run `pnpm test:go:published` to verify a fresh external module can import `pkg/bridge` without a local `replace`. For fork or candidate branch validation before upstream release, also set `GO_SDK_REPLACE_MODULE=<fork-module>`; the smoke test still imports the upstream SDK path, but resolves it through that remote module and version.
 
 ## Optional telemetry
 
 By default the bridge reports **nothing**: no metrics, no logs leave your machine, and it pulls in zero telemetry dependencies. The hook below is inert unless you opt in.
 
-To wire up your own monitoring, point an environment variable at a module that default-exports (or exports `createAdapter`) an `AdapterFactory`:
+For the TypeScript/npm CLI and the Go CLI, point an environment variable at a module that default-exports (or exports `createAdapter`) an `AdapterFactory`:
 
 ```bash
 LARK_CHANNEL_TELEMETRY_MODULE=your-telemetry-package lark-channel-bridge start
 ```
 
-That module receives every `log.*` event plus error/metric hooks and forwards them wherever you like. The interface is exported from the package root:
+That module receives every `log.*` event plus error/metric hooks and forwards them wherever you like. The Go CLI uses a small Node helper for the same module contract; Go SDK embeddings can either call `bridge.LoadTelemetryAdapterFromEnv` or inject `bridge.TelemetryAdapter`, `bridge.TelemetryAdapterFunc`, or `bridge.SetDefaultTelemetry` directly. The TypeScript interface is exported from the package root:
 
 ```ts
 import type { AdapterFactory, TelemetryAdapter, TelemetryEvent } from 'lark-channel-bridge';

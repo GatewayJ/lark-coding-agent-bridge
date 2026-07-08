@@ -1,0 +1,44 @@
+{
+  "name": "eof-after-error",
+  "steps": [
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "error",
+        "message": "transport failed"
+      },
+      "events": [],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "finish",
+      "reason": "failed",
+      "events": [
+        {
+          "type": "error",
+          "message": "codex stream ended before a terminal event: transport failed",
+          "terminationReason": "failed"
+        }
+      ],
+      "terminalEmitted": true,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "finish",
+      "reason": "failed",
+      "events": [],
+      "terminalEmitted": true,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    }
+  ]
+}

@@ -303,6 +303,10 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 
 云文档评论不再需要单独绑定工作目录或维护文档白名单。支持的文档评论里 @bot 后，bridge 会在同一个评论线程里回复。评论运行复用文档级 session key；没有记录过文档 cwd 时回退到用户 home 目录。
 
+## Go SDK
+
+Go SDK 入口在 `pkg/bridge`，用于把同一套 bridge 能力嵌入其他 Go 程序。参见 [docs/go-sdk-usage.md](docs/go-sdk-usage.md)，里面包含生产接入时与 CLI 等价的 profile/service 启动、进程内 bridge 嵌入、自定义 runtime adapter、lark-cli 兼容 helper、卡片渲染、telemetry 和验证命令。公共 facade 参考在 [docs/pkg/bridge.md](docs/pkg/bridge.md)。
+
 ## 常见问题
 
 **bot 没反应 / agent 不回复**：通常是本机 `claude` 或 `codex` CLI 没登录，或者当前会话指向了不存在的工作目录。发 `/status` 看当前状态；`/new` 重开会话往往就好。
@@ -319,21 +323,27 @@ grep '"event":"enter"' ~/.lark-channel/profiles/<profile>/logs/bridge-$(date +%Y
 pnpm test
 pnpm typecheck
 pnpm build
+pnpm test:go
+pnpm test:go:race
+pnpm test:go:cross
+pnpm test:go:tracked
+pnpm test:go:head
 ```
 
-`pnpm test` 包含 unit、integration 和 process-level adapter 测试。CI 在 macOS、Ubuntu、Windows 上执行 `pnpm install --frozen-lockfile`、`pnpm test`、`pnpm typecheck` 和 `pnpm build`。
+`pnpm test` 包含 unit、integration 和 process-level adapter 测试。`pnpm test:go` 执行 `go test ./...`，包含外部 Go SDK smoke test。`pnpm test:go:race` 覆盖 race 敏感的 Go SDK/runtime/Lark/service 包。`pnpm test:go:cross` 会交叉编译 Go CLI 入口，覆盖 Windows、macOS 和 Linux。CI 在 macOS、Ubuntu、Windows 上执行同一组 Node、Go、race 和 cross-compile gate。
+`pnpm test:go:tracked` 属于 `pnpm release:check`，会在必要 Go SDK 文件尚未纳入 Git 时失败。提交后、打 tag 前运行 `pnpm test:go:head`。发布 commit 或 tag 推送后，可设置 `GO_SDK_IMPORT_VERSION=<commit-or-tag>` 并运行 `pnpm test:go:published`，验证一个全新的外部 Go module 能在没有本地 `replace` 的情况下导入 `pkg/bridge`。如果需要在上游发布前验证 fork 或候选分支，再设置 `GO_SDK_REPLACE_MODULE=<fork-module>`；冒烟测试仍导入上游 SDK 路径，但会通过该远端 module 和版本解析。
 
 ## 可选：遥测（Telemetry）
 
 默认情况下 bridge **不上报任何数据**：没有指标、没有日志离开你的机器，也不引入任何遥测依赖。下面这个钩子在你主动开启前完全是空操作。
 
-想接自己的监控时，用环境变量指向一个 default export（或导出 `createAdapter`）`AdapterFactory` 的模块：
+TypeScript/npm CLI 和 Go CLI 想接自己的监控时，用环境变量指向一个 default export（或导出 `createAdapter`）`AdapterFactory` 的模块：
 
 ```bash
 LARK_CHANNEL_TELEMETRY_MODULE=your-telemetry-package lark-channel-bridge start
 ```
 
-该模块会收到每一条 `log.*` 事件，以及错误 / 指标钩子，转发到任何你想要的地方。接口从包根导出：
+该模块会收到每一条 `log.*` 事件，以及错误 / 指标钩子，转发到任何你想要的地方。Go CLI 会通过一个轻量 Node helper 复用同一模块契约；Go SDK 嵌入场景也可以调用 `bridge.LoadTelemetryAdapterFromEnv`，或直接注入 `bridge.TelemetryAdapter`、`bridge.TelemetryAdapterFunc`、`bridge.SetDefaultTelemetry`。TypeScript 接口从包根导出：
 
 ```ts
 import type { AdapterFactory, TelemetryAdapter, TelemetryEvent } from 'lark-channel-bridge';

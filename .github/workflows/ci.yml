@@ -26,6 +26,11 @@ jobs:
           node-version: 20
           cache: pnpm
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
       - name: Install
         run: pnpm install --frozen-lockfile
 
@@ -37,3 +42,18 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Go module check
+        run: pnpm test:go:mod
+
+      - name: Go test
+        run: pnpm test:go
+
+      - name: Go race test
+        run: pnpm test:go:race
+
+      - name: Go vet
+        run: pnpm test:go:vet
+
+      - name: Go cross compile
+        run: pnpm test:go:cross

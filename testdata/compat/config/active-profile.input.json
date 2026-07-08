@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 2,
+  "activeProfile": "claude",
+  "preferences": {},
+  "secrets": {
+    "defaults": {
+      "env": "default"
+    },
+    "providers": {
+      "default": {
+        "source": "env",
+        "allowlist": [
+          "LARK_APP_SECRET"
+        ]
+      }
+    }
+  },
+  "profiles": {
+    "claude": {
+      "schemaVersion": 2,
+      "agentKind": "claude",
+      "accounts": {
+        "app": {
+          "id": "cli_claude",
+          "secret": "${LARK_APP_SECRET}",
+          "tenant": "feishu"
+        }
+      }
+    },
+    "codex": {
+      "schemaVersion": 2,
+      "agentKind": "codex",
+      "accounts": {
+        "app": {
+          "id": "cli_codex_active",
+          "secret": "${LARK_APP_SECRET}",
+          "tenant": "feishu"
+        }
+      },
+      "codex": {
+        "binaryPath": "codex"
+      }
+    }
+  }
+}

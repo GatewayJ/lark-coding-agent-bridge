@@ -1,0 +1,44 @@
+{
+  "accounts": {
+    "app": {
+      "id": "cli_legacy",
+      "secret": {
+        "source": "exec",
+        "provider": "bridge",
+        "id": "app-cli_legacy"
+      },
+      "tenant": "feishu"
+    }
+  },
+  "secrets": {
+    "providers": {
+      "bridge": {
+        "source": "exec",
+        "command": "/opt/bridge/secrets-getter",
+        "args": []
+      }
+    },
+    "defaults": {
+      "exec": "bridge"
+    }
+  },
+  "preferences": {
+    "messageReply": "text",
+    "messageReplyMigrated": false,
+    "showToolCalls": false,
+    "cotMessages": "simple",
+    "requireMentionInGroup": false,
+    "access": {
+      "allowedUsers": [
+        "ou_legacy",
+        42
+      ],
+      "allowedChats": [
+        "oc_legacy"
+      ],
+      "admins": [
+        "ou_admin"
+      ]
+    }
+  }
+}

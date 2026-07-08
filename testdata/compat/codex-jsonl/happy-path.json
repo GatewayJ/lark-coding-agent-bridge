@@ -1,0 +1,135 @@
+{
+  "name": "happy-path",
+  "steps": [
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "thread.started",
+        "thread_id": "thread-1"
+      },
+      "events": [
+        {
+          "type": "system",
+          "threadId": "thread-1"
+        }
+      ],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "turn.started"
+      },
+      "events": [],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "item.started",
+        "item": {
+          "id": "cmd-1",
+          "type": "command_execution",
+          "command": "pwd"
+        }
+      },
+      "events": [
+        {
+          "type": "tool_use",
+          "id": "cmd-1",
+          "name": "command_execution",
+          "input": {
+            "command": "pwd"
+          }
+        }
+      ],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "item.completed",
+        "item": {
+          "id": "cmd-1",
+          "type": "command_execution",
+          "output": "/repo\n",
+          "exit_code": 0
+        }
+      },
+      "events": [
+        {
+          "type": "tool_result",
+          "id": "cmd-1",
+          "output": "/repo\n",
+          "isError": false
+        }
+      ],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "agent_message",
+        "message": "hello"
+      },
+      "events": [
+        {
+          "type": "text",
+          "delta": "hello"
+        }
+      ],
+      "terminalEmitted": false,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    },
+    {
+      "kind": "translate",
+      "raw": {
+        "type": "turn.completed",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 34,
+          "cached_input_tokens": 5,
+          "reasoning_output_tokens": 7
+        }
+      },
+      "events": [
+        {
+          "type": "usage",
+          "inputTokens": 12,
+          "outputTokens": 34,
+          "cachedInputTokens": 5,
+          "reasoningOutputTokens": 7
+        },
+        {
+          "type": "done",
+          "threadId": "thread-1",
+          "terminationReason": "normal"
+        }
+      ],
+      "terminalEmitted": true,
+      "protocolDrift": {
+        "unknownEvents": 0,
+        "anomalies": 0
+      }
+    }
+  ]
+}
