@@ -141,6 +141,8 @@ describe('markdown stream startup failures', () => {
       () => h.channel.rawClient.im.v1.messageReaction.delete.mock.calls.length > 0,
       4500,
     );
+    expect(lastMarkdown(h.channel)).toContain('agent 失败');
+    expect(lastMarkdown(h.channel)).toContain('codex exited with code 1');
 
     await h.channel.handlers.message?.(message('om_second', 'second'));
     await waitFor(() => h.agent.runOptions.length === 2);

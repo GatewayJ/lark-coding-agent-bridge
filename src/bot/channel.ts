@@ -1413,6 +1413,7 @@ async function awaitRenderAwareStream(input: {
       mode: input.mode,
       graceMs: STREAM_TERMINAL_GRACE_MS,
     });
+    await runFallbackReply(input.mode, first.state, input.fallback);
     void streamResult.then((result) => {
       if (!result.ok) {
         log.fail('stream', result.err, { mode: input.mode, step: 'stream-terminal-late' });
@@ -1420,7 +1421,11 @@ async function awaitRenderAwareStream(input: {
     });
     return;
   }
-  if (!terminal.ok) throw terminal.err;
+  if (!terminal.ok) {
+    log.fail('stream', terminal.err, { mode: input.mode, step: 'stream-terminal' });
+    await runFallbackReply(input.mode, first.state, input.fallback);
+    return;
+  }
 }
 
 async function runFallbackReply(
