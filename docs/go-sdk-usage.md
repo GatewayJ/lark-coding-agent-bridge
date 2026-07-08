@@ -180,6 +180,7 @@ workspace state, JSONL logs, and optional JavaScript telemetry.
 instance, info, err := bridge.NewProfileBridge(ctx, bridge.ProfileBridgeOptions{
     Home:                 "/var/lib/lark-channel",
     Profile:              "codex",
+    LogDir:               "/var/log/lark-channel",
     SecretsGetterCommand: "/usr/local/bin/lark-channel-bridge",
 })
 if err != nil {
@@ -206,6 +207,8 @@ Important options:
 - `LoadTelemetryFromEnv` explicitly opts into loading the legacy JavaScript
   telemetry module named by `LARK_CHANNEL_TELEMETRY_MODULE`. It is disabled by
   default so constructing a profile bridge does not spawn Node.js.
+- `LogDir` overrides the default JSONL log directory. If empty, logs are written
+  under `<Home>/profiles/<Profile>/logs`.
 - `LarkTransport`, `Logger`, `Telemetry`, `CommandOptions`, and
   `AccountValidator` let production hosts replace the default OAPI,
   observability, command, and credential-validation wiring.
@@ -366,10 +369,15 @@ instance, err := bridge.New(bridge.Options{
     },
     LarkTransport: transport,
     LarkManaged: bridge.LarkManagedOptions{
+        InitialOwnerOpenID: "ou_creator",
         CommandOptions: bridge.CommandOptions{Workspaces: workspaces},
     },
 })
 ```
+
+`InitialOwnerOpenID` is optional. Use it when your host already knows the app
+creator/owner from a QR registration or onboarding flow; the bridge still
+refreshes the canonical app owner from Feishu after startup.
 
 ## Cards And Telemetry
 

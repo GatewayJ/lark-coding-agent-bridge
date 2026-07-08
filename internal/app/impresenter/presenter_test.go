@@ -2,6 +2,7 @@ package impresenter
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -233,6 +234,63 @@ func TestPresentMarkdownModeStreamsThrottledUpdates(t *testing.T) {
 	}
 }
 
+func TestPresentMarkdownModeFallsBackToNewMessageWhenFinalUpdateFails(t *testing.T) {
+	ch := &fakeChannel{messageUpdateErr: errors.New("patch denied")}
+	run := fakeRun([]agentport.AgentEvent{
+		textEvent("final answer"),
+		{Type: agentport.EventDone},
+	})
+
+	_, err := Present(context.Background(), Input{
+		Run:       run,
+		Channel:   ch,
+		ChatID:    "oc_chat",
+		ReplyMode: ReplyMarkdown,
+	})
+	if err != nil {
+		t.Fatalf("Present returned error: %v", err)
+	}
+	if len(ch.messageUpdates) == 0 {
+		t.Fatalf("message updates = %#v, want attempted update", ch.messageUpdates)
+	}
+	if len(ch.messages) != 2 {
+		t.Fatalf("messages = %#v, want initial stream plus fallback final", ch.messages)
+	}
+	if !strings.Contains(ch.messages[1].Content.Markdown, "final answer") {
+		t.Fatalf("fallback final message = %#v", ch.messages[1])
+	}
+}
+
+func TestPresentMarkdownModeStopsStreamingAfterUpdateFails(t *testing.T) {
+	ch := &fakeChannel{messageUpdateErr: errors.New("message cannot be updated")}
+	run := delayedRun{
+		{event: textEvent("first")},
+		{after: 15 * time.Millisecond, event: textEvent(" second")},
+		{after: 15 * time.Millisecond, event: textEvent(" third")},
+		{event: agentport.AgentEvent{Type: agentport.EventDone}},
+	}
+
+	_, err := Present(context.Background(), Input{
+		Run:            run,
+		Channel:        ch,
+		ChatID:         "oc_chat",
+		ReplyMode:      ReplyMarkdown,
+		StreamThrottle: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Present returned error: %v", err)
+	}
+	if len(ch.messageUpdates) != 1 {
+		t.Fatalf("message updates = %#v, want one failed streaming update", ch.messageUpdates)
+	}
+	if len(ch.messages) != 2 {
+		t.Fatalf("messages = %#v, want initial stream plus fallback final", ch.messages)
+	}
+	if !strings.Contains(ch.messages[1].Content.Markdown, "first second third") {
+		t.Fatalf("fallback final message = %#v", ch.messages[1])
+	}
+}
+
 func TestPresentStopsRunOnIdleTimeout(t *testing.T) {
 	ch := &fakeChannel{}
 	run := newIdleBlockingRun(textEvent("partial"))
@@ -382,10 +440,11 @@ func (r *idleBlockingRun) Stop(context.Context) error {
 }
 
 type fakeChannel struct {
-	messages       []SendMessageRequest
-	cards          []SendCardRequest
-	updates        []UpdateCardRequest
-	messageUpdates []UpdateMessageRequest
+	messages         []SendMessageRequest
+	cards            []SendCardRequest
+	updates          []UpdateCardRequest
+	messageUpdates   []UpdateMessageRequest
+	messageUpdateErr error
 }
 
 func (c *fakeChannel) SendMessage(_ context.Context, req SendMessageRequest) (SendMessageResult, error) {
@@ -405,7 +464,7 @@ func (c *fakeChannel) UpdateCard(_ context.Context, req UpdateCardRequest) error
 
 func (c *fakeChannel) UpdateMessage(_ context.Context, req UpdateMessageRequest) error {
 	c.messageUpdates = append(c.messageUpdates, req)
-	return nil
+	return c.messageUpdateErr
 }
 
 func textEvent(delta string) agentport.AgentEvent {

@@ -405,6 +405,11 @@ func buildBridgeRuntimeAdapter(opts Options, client *Client, paths apppaths.Path
 				AppID:      opts.AppID,
 				Managed:    managedOptions,
 				Workspaces: workspaces,
+				OnInfo: func(ctx context.Context, msg string, fields map[string]any) {
+					if opts.Logger != nil {
+						opts.Logger.Info(msg, fields)
+					}
+				},
 				OnError: func(ctx context.Context, err error, fields map[string]any) {
 					if opts.Logger != nil {
 						opts.Logger.Error(err.Error(), fields)

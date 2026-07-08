@@ -77,6 +77,9 @@ state. Hosts that use `Client.HandleCommand` while rotating clients can call
 Lark transports provide `/new chat [name]` automatically; direct command hosts
 can pass `CommandOptions.ChatCreator` to enable group creation with sender
 invitation.
+If the host already knows the app creator/owner `open_id`, pass
+`LarkManagedOptions.InitialOwnerOpenID` as the startup fallback; the managed
+intake still refreshes the canonical owner from Feishu/Lark runtime info.
 
 Minimal external embedding example:
 
@@ -124,6 +127,8 @@ fake transport both implement the COT client interface, including create,
 update, completion, and update-failure degradation behavior. Non-card reply
 modes add a best-effort `Typing` reaction to the triggering message and clean
 it up after the run when the transport supports message reactions. Managed
+profile bridges accept `ProfileBridgeOptions.LogDir` to override the default
+`<Home>/profiles/<Profile>/logs` JSONL log directory. Managed
 command responses for `/config` and `/account` now render the Go CardKit forms
 and update the originating card action when possible. Form submit actions for
 `/config submit` and `/account submit` detach from the callback and wait for the

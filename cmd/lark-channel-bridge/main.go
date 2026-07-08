@@ -792,7 +792,7 @@ func buildBootstrapProfileConfig(opts startOptions, paths apppaths.Paths) (confi
 	if err != nil {
 		return configstore.ProfileConfig{}, nil, err
 	}
-	appID, appSecret, tenant, err := resolveBootstrapAppCredentials(context.Background(), opts)
+	appID, appSecret, tenant, creatorOpenID, err := bootstrapAppCredentialResolver(context.Background(), opts)
 	if err != nil {
 		return configstore.ProfileConfig{}, nil, err
 	}
@@ -824,6 +824,7 @@ func buildBootstrapProfileConfig(opts startOptions, paths apppaths.Paths) (confi
 		}},
 		Preferences: map[string]any{},
 		Access: configstore.ProfileAccess{
+			Admins:                bootstrapCreatorAdmins(creatorOpenID),
 			RequireMentionInGroup: true,
 		},
 		Workspaces:       configstore.Workspaces{Default: defaultWorkspace},
@@ -848,35 +849,45 @@ func buildBootstrapProfileConfig(opts startOptions, paths apppaths.Paths) (confi
 	return profile, secrets, nil
 }
 
-func resolveBootstrapAppCredentials(ctx context.Context, opts startOptions) (string, string, larkcli.TenantBrand, error) {
+var bootstrapAppCredentialResolver = resolveBootstrapAppCredentials
+
+func bootstrapCreatorAdmins(openID string) []string {
+	openID = strings.TrimSpace(openID)
+	if openID == "" {
+		return nil
+	}
+	return []string{openID}
+}
+
+func resolveBootstrapAppCredentials(ctx context.Context, opts startOptions) (string, string, larkcli.TenantBrand, string, error) {
 	if opts.AppID == "" {
 		if !stdioInteractive() {
-			return "", "", "", fmt.Errorf("当前没有配置，非交互模式无法完成扫码创建应用。请先在终端运行 `lark-channel-bridge run` 完成首次初始化，或传入 --app-id 和 --app-secret")
+			return "", "", "", "", fmt.Errorf("当前没有配置，非交互模式无法完成扫码创建应用。请先在终端运行 `lark-channel-bridge run` 完成首次初始化，或传入 --app-id 和 --app-secret")
 		}
 		return runRegistrationWizard(ctx)
 	}
 	appSecret := opts.AppSecret
 	if appSecret == "" {
 		if !stdioInteractive() {
-			return "", "", "", fmt.Errorf("非交互模式缺少 App Secret: %s。请传入 --app-secret <secret>，或在终端中重新运行命令后按提示输入", opts.AppID)
+			return "", "", "", "", fmt.Errorf("非交互模式缺少 App Secret: %s。请传入 --app-secret <secret>，或在终端中重新运行命令后按提示输入", opts.AppID)
 		}
 		answer, err := promptHiddenSecret(os.Stdout, fmt.Sprintf("输入 %s 的 App Secret: ", opts.AppID))
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", "", err
 		}
 		appSecret = strings.TrimSpace(answer)
 	}
 	if appSecret == "" {
-		return "", "", "", fmt.Errorf("app secret is required")
+		return "", "", "", "", fmt.Errorf("app secret is required")
 	}
 	tenant, err := bootstrapTenant(opts.Tenant)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	if err := validateBootstrapAppCredentials(ctx, opts.AppID, appSecret, tenant); err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
-	return opts.AppID, appSecret, tenant, nil
+	return opts.AppID, appSecret, tenant, "", nil
 }
 
 var bootstrapAppCredentialValidator = validateStartAppCredentials
@@ -897,7 +908,7 @@ func validateBootstrapAppCredentials(ctx context.Context, appID string, appSecre
 	return nil
 }
 
-func runRegistrationWizard(ctx context.Context) (string, string, larkcli.TenantBrand, error) {
+func runRegistrationWizard(ctx context.Context) (string, string, larkcli.TenantBrand, string, error) {
 	fmt.Fprintln(os.Stdout, "\n未检测到飞书应用配置，进入扫码创建向导。")
 	result, err := registration.RegisterApp(ctx, &registration.Options{
 		Source: "lark-channel-bridge",
@@ -917,24 +928,28 @@ func runRegistrationWizard(ctx context.Context) (string, string, larkcli.TenantB
 		},
 	})
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	if result == nil || result.ClientID == "" || result.ClientSecret == "" {
-		return "", "", "", fmt.Errorf("registration did not return app credentials")
+		return "", "", "", "", fmt.Errorf("registration did not return app credentials")
 	}
 	tenant := larkcli.TenantFeishu
 	if result.UserInfo != nil && result.UserInfo.TenantBrand == string(larkcli.TenantLark) {
 		tenant = larkcli.TenantLark
 	}
+	creatorOpenID := ""
+	if result.UserInfo != nil {
+		creatorOpenID = strings.TrimSpace(result.UserInfo.OpenID)
+	}
 	fmt.Fprintln(os.Stdout, "✓ 应用创建成功")
 	fmt.Fprintf(os.Stdout, "  App ID:  %s\n", result.ClientID)
 	fmt.Fprintf(os.Stdout, "  Tenant:  %s\n", tenant)
-	if result.UserInfo != nil && result.UserInfo.OpenID != "" {
-		fmt.Fprintf(os.Stdout, "  Creator: %s (Lark 应用 owner，自动豁免访问控制)\n", result.UserInfo.OpenID)
+	if creatorOpenID != "" {
+		fmt.Fprintf(os.Stdout, "  Creator: %s (Lark 应用 owner，已写入初始管理员兜底)\n", creatorOpenID)
 	} else {
 		fmt.Fprintln(os.Stdout, "  未拿到扫码用户 open_id；启动后会通过应用 owner API 解析创建者。")
 	}
-	return result.ClientID, result.ClientSecret, tenant, nil
+	return result.ClientID, result.ClientSecret, tenant, creatorOpenID, nil
 }
 
 type detectedLocalAgent struct {

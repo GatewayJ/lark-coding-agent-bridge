@@ -123,6 +123,20 @@ func TestManagedLarkIntakeKeepsCachedOwnerWhenRefreshReturnsEmpty(t *testing.T) 
 	}
 }
 
+func TestManagedLarkIntakeSeedsInitialOwnerOpenID(t *testing.T) {
+	intake := newManagedLarkIntake(managedLarkIntakeOptions{
+		Managed: LarkManagedOptions{InitialOwnerOpenID: " ou_seed "},
+	})
+
+	options := intake.currentCommandOptions()
+	if options.RuntimeControls.BotOwnerID != "ou_seed" ||
+		options.RuntimeControls.OwnerRefreshState != "ok" ||
+		options.RuntimeControls.OwnerRefreshedAt == 0 ||
+		options.RuntimeControls.OwnerRefreshError != "" {
+		t.Fatalf("runtime controls = %#v", options.RuntimeControls)
+	}
+}
+
 func TestManagedLarkIntakeUsesFetchedOwnerForAccess(t *testing.T) {
 	client, err := NewCodexClient(CodexClientOptions{
 		Binary:             "codex",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -55,6 +56,7 @@ type managedLarkIntake struct {
 	cotMessages    appcot.Mode
 	workspaces     CommandWorkspaceStore
 	cotClient      appcot.Client
+	onInfo         func(ctx context.Context, msg string, fields map[string]any)
 	onError        func(ctx context.Context, err error, fields map[string]any)
 
 	activeMu   sync.Mutex
@@ -118,6 +120,13 @@ func newManagedLarkIntake(options managedLarkIntakeOptions) *managedLarkIntake {
 		}
 	}
 	commandOptions := options.Managed.CommandOptions
+	initialOwnerOpenID := strings.TrimSpace(options.Managed.InitialOwnerOpenID)
+	if initialOwnerOpenID != "" && strings.TrimSpace(commandOptions.RuntimeControls.BotOwnerID) == "" {
+		commandOptions.RuntimeControls.BotOwnerID = initialOwnerOpenID
+		commandOptions.RuntimeControls.OwnerRefreshState = "ok"
+		commandOptions.RuntimeControls.OwnerRefreshedAt = time.Now().UnixMilli()
+		commandOptions.RuntimeControls.OwnerRefreshError = ""
+	}
 	if commandOptions.ChatCreator == nil {
 		if creator, ok := options.Transport.(CommandChatCreator); ok {
 			commandOptions.ChatCreator = creator
@@ -147,6 +156,7 @@ func newManagedLarkIntake(options managedLarkIntakeOptions) *managedLarkIntake {
 		cotMessages:          managedCotMessagesMode(options.Managed.CotMessages),
 		workspaces:           options.Workspaces,
 		cotClient:            wrapInternalLarkCOTClient(cotClient),
+		onInfo:               options.OnInfo,
 		onError:              options.OnError,
 		activeRuns:           make(map[string]managedActiveRun),
 		lifecycleCtx:         lifecycleCtx,
@@ -172,6 +182,7 @@ type managedLarkIntakeOptions struct {
 	AppID      string
 	Managed    LarkManagedOptions
 	Workspaces CommandWorkspaceStore
+	OnInfo     func(ctx context.Context, msg string, fields map[string]any)
 	OnError    func(ctx context.Context, err error, fields map[string]any)
 }
 
@@ -183,11 +194,14 @@ type managedActiveRun struct {
 func (i *managedLarkIntake) HandleLarkEvent(ctx context.Context, event LarkNormalizedEvent) error {
 	i.ensureRuntimeInfo(ctx)
 	internal := toInternalLarkNormalizedEvent(event)
+	i.recordInfo(ctx, "lark.event.received", managedEventFields(internal))
 	switch internal.Kind {
 	case appintake.EventComment:
 		return i.handleComment(ctx, internal)
 	case appintake.EventMessage:
 		return i.handleMessage(ctx, internal)
+	case appintake.EventReconnect, appintake.EventKeepalive, appintake.EventDisconnect:
+		return nil
 	default:
 		return nil
 	}
@@ -356,6 +370,11 @@ func (i *managedLarkIntake) refreshRuntimeOwner(ctx context.Context) {
 			options.RuntimeControls.OwnerRefreshedAt = now
 			options.RuntimeControls.OwnerRefreshError = ""
 		})
+		i.recordInfo(ctx, "access.owner_refresh_succeeded", map[string]any{
+			"phase":   "managed_owner_refresh",
+			"appId":   i.appID,
+			"ownerId": ownerID,
+		})
 	}
 }
 
@@ -409,12 +428,14 @@ func (i *managedLarkIntake) handleMessage(ctx context.Context, event appintake.N
 	msg := *event.Message
 	decision := i.messageAccessDecision(msg)
 	if !decision.OK {
+		i.recordInfo(ctx, "lark.message.ignored", managedMessageDecisionFields(msg, decision.Reason))
 		if msg.ChatType != appintake.ChatTypeP2P && decision.Reason == AccessDeniedChat && msg.MentionedBot {
 			i.sendNonAllowedGroupHint(ctx, msg)
 		}
 		return nil
 	}
 	if msg.ChatType != appintake.ChatTypeP2P && i.client.profile.Access.RequireMentionInGroup && !msg.MentionedBot {
+		i.recordInfo(ctx, "lark.message.ignored", managedMessageDecisionFields(msg, "missing-mention"))
 		return nil
 	}
 
@@ -706,7 +727,7 @@ func (i *managedLarkIntake) handleBatch(ctx context.Context, batch appintake.Bat
 }
 
 func (i *managedLarkIntake) presenterChannel() appimpresenter.Channel {
-	base := presenterChannel{transport: i.transport}
+	base := presenterChannel{transport: i.transport, onInfo: i.recordInfo, onError: i.recordError}
 	if _, ok := i.transport.(interface {
 		UpdateMessage(context.Context, LarkUpdateMessageRequest) error
 	}); ok {
@@ -1407,6 +1428,89 @@ func (i *managedLarkIntake) recordError(ctx context.Context, err error, fields m
 	}
 }
 
+func (i *managedLarkIntake) recordInfo(ctx context.Context, msg string, fields map[string]any) {
+	if i.onInfo != nil {
+		i.onInfo(ctx, msg, fields)
+	}
+}
+
+func managedEventFields(event appintake.NormalizedEvent) map[string]any {
+	fields := map[string]any{
+		"phase": "lark_event",
+		"kind":  string(event.Kind),
+	}
+	if event.Scope.Key != "" {
+		fields["scope"] = event.Scope.Key
+	}
+	if event.Scope.Source != "" {
+		fields["source"] = string(event.Scope.Source)
+	}
+	if event.Scope.ChatID != "" {
+		fields["chatId"] = event.Scope.ChatID
+	}
+	if event.Scope.ChatType != "" {
+		fields["chatType"] = string(event.Scope.ChatType)
+	}
+	if event.Scope.ChatMode != "" {
+		fields["chatMode"] = string(event.Scope.ChatMode)
+	}
+	if event.Scope.ThreadID != "" {
+		fields["threadId"] = event.Scope.ThreadID
+	}
+	if event.Scope.ActorID != "" {
+		fields["actorId"] = event.Scope.ActorID
+	}
+	if event.Message != nil {
+		fields["messageId"] = event.Message.MessageID
+		fields["senderId"] = event.Message.Sender.OpenID
+		if event.Message.SenderType != "" {
+			fields["senderType"] = string(event.Message.SenderType)
+		}
+		fields["mentionedBot"] = event.Message.MentionedBot
+	}
+	if event.Self.Drop {
+		fields["selfLoop"] = true
+		fields["selfLoopReason"] = string(event.Self.Reason)
+	}
+	if event.Reconnect != nil {
+		fields["reconnectPhase"] = string(event.Reconnect.Phase)
+		if event.Reconnect.Error != "" {
+			fields["reconnectError"] = event.Reconnect.Error
+		}
+	}
+	if event.Keepalive != nil {
+		fields["connectionState"] = string(event.Keepalive.State)
+		fields["networkReachable"] = event.Keepalive.NetworkReachable
+	}
+	if event.Disconnect != nil {
+		fields["disconnectReason"] = event.Disconnect.Reason
+	}
+	return fields
+}
+
+func managedMessageDecisionFields(msg appintake.MessageInput, reason any) map[string]any {
+	fields := map[string]any{
+		"phase":        "lark_event",
+		"kind":         string(appintake.EventMessage),
+		"messageId":    msg.MessageID,
+		"chatId":       msg.ChatID,
+		"chatType":     string(msg.ChatType),
+		"senderId":     msg.Sender.OpenID,
+		"mentionedBot": msg.MentionedBot,
+		"reason":       fmt.Sprint(reason),
+	}
+	if msg.ResolvedMode != "" {
+		fields["chatMode"] = string(msg.ResolvedMode)
+	}
+	if msg.ThreadID != "" {
+		fields["threadId"] = msg.ThreadID
+	}
+	if msg.SenderType != "" {
+		fields["senderType"] = string(msg.SenderType)
+	}
+	return fields
+}
+
 func managedBatchMessages(events []appintake.NormalizedEvent) []appintake.MessageInput {
 	out := make([]appintake.MessageInput, 0, len(events))
 	for _, event := range events {
@@ -1824,12 +1928,15 @@ func (r presenterRun) Stop(ctx context.Context) error {
 
 type presenterChannel struct {
 	transport LarkTransport
+	onInfo    func(ctx context.Context, msg string, fields map[string]any)
+	onError   func(ctx context.Context, err error, fields map[string]any)
 }
 
 func (c presenterChannel) SendMessage(ctx context.Context, req appimpresenter.SendMessageRequest) (appimpresenter.SendMessageResult, error) {
 	if c.transport == nil {
 		return appimpresenter.SendMessageResult{}, ErrNilLarkTransport
 	}
+	opts := fromPresenterSendOptions(req.Options)
 	result, err := c.transport.SendMessage(ctx, LarkSendMessageRequest{
 		ChatID: req.ChatID,
 		Content: LarkMessageContent{
@@ -1837,8 +1944,9 @@ func (c presenterChannel) SendMessage(ctx context.Context, req appimpresenter.Se
 			Markdown: req.Content.Markdown,
 			Card:     req.Content.Card,
 		},
-		Options: fromPresenterSendOptions(req.Options),
+		Options: opts,
 	})
+	c.recordDelivery(ctx, "lark.reply.sent", presenterDeliveryFields("send_message", presenterMessageContentKind(req.Content), req.ChatID, req.Options, result.MessageID), err)
 	return appimpresenter.SendMessageResult{MessageID: result.MessageID}, err
 }
 
@@ -1846,11 +1954,13 @@ func (c presenterChannel) SendCard(ctx context.Context, req appimpresenter.SendC
 	if c.transport == nil {
 		return appimpresenter.SendCardResult{}, ErrNilLarkTransport
 	}
+	opts := fromPresenterSendOptions(req.Options)
 	result, err := c.transport.SendCard(ctx, LarkSendCardRequest{
 		ChatID:  req.ChatID,
 		Card:    req.Card,
-		Options: fromPresenterSendOptions(req.Options),
+		Options: opts,
 	})
+	c.recordDelivery(ctx, "lark.reply.sent", presenterDeliveryFields("send_card", "card", req.ChatID, req.Options, result.MessageID), err)
 	return appimpresenter.SendCardResult{MessageID: result.MessageID}, err
 }
 
@@ -1858,10 +1968,12 @@ func (c presenterChannel) UpdateCard(ctx context.Context, req appimpresenter.Upd
 	if c.transport == nil {
 		return ErrNilLarkTransport
 	}
-	return c.transport.UpdateCard(ctx, LarkUpdateCardRequest{
+	err := c.transport.UpdateCard(ctx, LarkUpdateCardRequest{
 		MessageID: req.MessageID,
 		Card:      req.Card,
 	})
+	c.recordDelivery(ctx, "lark.reply.updated", presenterDeliveryFields("update_card", "card", "", appimpresenter.SendOptions{}, req.MessageID), err)
+	return err
 }
 
 type presenterStreamingChannel struct {
@@ -1875,7 +1987,7 @@ func (c presenterStreamingChannel) UpdateMessage(ctx context.Context, req appimp
 	updater := c.transport.(interface {
 		UpdateMessage(context.Context, LarkUpdateMessageRequest) error
 	})
-	return updater.UpdateMessage(ctx, LarkUpdateMessageRequest{
+	err := updater.UpdateMessage(ctx, LarkUpdateMessageRequest{
 		MessageID: req.MessageID,
 		Content: LarkMessageContent{
 			Text:     req.Content.Text,
@@ -1883,6 +1995,57 @@ func (c presenterStreamingChannel) UpdateMessage(ctx context.Context, req appimp
 			Card:     req.Content.Card,
 		},
 	})
+	c.recordDelivery(ctx, "lark.reply.updated", presenterDeliveryFields("update_message", presenterMessageContentKind(req.Content), "", appimpresenter.SendOptions{}, req.MessageID), err)
+	return err
+}
+
+func (c presenterChannel) recordDelivery(ctx context.Context, msg string, fields map[string]any, err error) {
+	if err != nil {
+		if c.onError != nil {
+			c.onError(ctx, err, fields)
+		}
+		return
+	}
+	if c.onInfo != nil {
+		c.onInfo(ctx, msg, fields)
+	}
+}
+
+func presenterDeliveryFields(operation, contentKind, chatID string, opts appimpresenter.SendOptions, messageID string) map[string]any {
+	fields := map[string]any{
+		"phase":       "lark_reply",
+		"operation":   operation,
+		"contentKind": contentKind,
+	}
+	if chatID != "" {
+		fields["chatId"] = chatID
+	}
+	if messageID != "" {
+		fields["messageId"] = messageID
+	}
+	if opts.ReplyTo != "" {
+		fields["replyTo"] = opts.ReplyTo
+	}
+	if opts.ReplyInThread {
+		fields["replyInThread"] = true
+	}
+	if opts.ThreadID != "" {
+		fields["threadId"] = opts.ThreadID
+	}
+	return fields
+}
+
+func presenterMessageContentKind(content appimpresenter.MessageContent) string {
+	switch {
+	case content.Card != nil:
+		return "card"
+	case content.Markdown != "":
+		return "markdown"
+	case content.Text != "":
+		return "text"
+	default:
+		return "empty"
+	}
 }
 
 func toPresenterSendOptions(opts LarkSendOptions) appimpresenter.SendOptions {

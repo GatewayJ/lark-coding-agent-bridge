@@ -42,12 +42,14 @@ type ProfileBridgeOptions struct {
 	LarkCLIBaseEnv          map[string]string
 	LarkCLIRunner           LarkCLIPreflightRunner
 	CommandOptions          CommandOptions
+	InitialOwnerOpenID      string
 	AccountValidator        CommandAccountValidator
 	DisableDefaultLogger    bool
 	DisableDefaultTelemetry bool
 	LoadTelemetryFromEnv    bool
 	Logger                  Logger
 	Telemetry               TelemetryAdapter
+	LogDir                  string
 	LogStdout               io.Writer
 	LogStderr               io.Writer
 	TelemetryStderr         io.Writer
@@ -234,11 +236,12 @@ func NewProfileBridge(ctx context.Context, options ProfileBridgeOptions) (*Bridg
 		LarkTransport:         transport,
 		LarkProfileProjection: projection,
 		LarkManaged: LarkManagedOptions{
-			MessageReplyMode: startProfileBridgeReplyMode(runtimeConfig.Preferences),
-			ShowToolCalls:    profileBridgeBoolPtr(startProfileBridgeShowToolCalls(runtimeConfig.Preferences)),
-			CotMessages:      startProfileBridgeCotMessages(runtimeConfig.Preferences),
-			CommandOptions:   commandOptions,
-			CallbackAuth:     callbackAuth,
+			MessageReplyMode:   startProfileBridgeReplyMode(runtimeConfig.Preferences),
+			ShowToolCalls:      profileBridgeBoolPtr(startProfileBridgeShowToolCalls(runtimeConfig.Preferences)),
+			CotMessages:        startProfileBridgeCotMessages(runtimeConfig.Preferences),
+			CommandOptions:     commandOptions,
+			InitialOwnerOpenID: options.InitialOwnerOpenID,
+			CallbackAuth:       callbackAuth,
 		},
 		AppID:      appConfig.Accounts.App.ID,
 		Tenant:     RuntimeTenant(appConfig.Accounts.App.Tenant),
@@ -381,7 +384,7 @@ func profileBridgeObservability(ctx context.Context, options ProfileBridgeOption
 	logger := options.Logger
 	if logger == nil && !options.DisableDefaultLogger {
 		jsonl := NewJSONLLogger(JSONLLoggerOptions{
-			Dir:       paths.LogsDir,
+			Dir:       firstNonEmptyBridge(options.LogDir, paths.LogsDir),
 			Stdout:    options.LogStdout,
 			Stderr:    options.LogStderr,
 			Telemetry: telemetry,

@@ -16,6 +16,22 @@ import (
 	appintake "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/intake"
 )
 
+func TestOAPITransportInitializesWSEventDispatcher(t *testing.T) {
+	transport, err := NewOAPITransport(OAPITransportOptions{
+		AppID:     "cli_test_app",
+		AppSecret: "test_secret",
+	})
+	if err != nil {
+		t.Fatalf("NewOAPITransport error = %v", err)
+	}
+	if transport.wsClient == nil {
+		t.Fatalf("wsClient is nil")
+	}
+	if transport.wsClient.EventHandler() == nil {
+		t.Fatalf("wsClient event handler is nil")
+	}
+}
+
 func TestOAPITransportSendMessageAndCardIDUseChannelSendContract(t *testing.T) {
 	channel := &fakeOAPIChannel{}
 	transport, err := NewOAPITransport(OAPITransportOptions{channel: channel})
@@ -62,22 +78,25 @@ func TestOAPITransportSendMessageAndCardIDUseChannelSendContract(t *testing.T) {
 	}
 }
 
-func TestOAPITransportUpdateMessagePatchesMarkdownContent(t *testing.T) {
+func TestOAPITransportUpdateMessageUpdatesMarkdownContent(t *testing.T) {
 	server := newOAPICommentTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/open-apis/auth/v3/tenant_access_token/internal":
 			writeOAPIJSON(t, w, map[string]any{"code": 0, "msg": "ok", "tenant_access_token": "tenant-token", "expire": 7200})
 		case "/open-apis/im/v1/messages/om_stream":
-			if r.Method != http.MethodPatch {
-				t.Fatalf("method = %s, want PATCH", r.Method)
+			if r.Method != http.MethodPut {
+				t.Fatalf("method = %s, want PUT", r.Method)
 			}
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatalf("patch body is not json: %v", err)
+				t.Fatalf("update body is not json: %v", err)
+			}
+			if body["msg_type"] != "post" {
+				t.Fatalf("msg_type = %#v, want post", body["msg_type"])
 			}
 			content, _ := body["content"].(string)
 			if !strings.Contains(content, "hello") || !strings.Contains(content, "world") {
-				t.Fatalf("patch content = %q", content)
+				t.Fatalf("update content = %q", content)
 			}
 			writeOAPIJSON(t, w, map[string]any{"code": 0, "msg": "ok"})
 		default:
@@ -640,6 +659,33 @@ func TestOAPITransportRejectsRepeatedConnectOnSameInstance(t *testing.T) {
 	}
 }
 
+func TestOAPITransportRegistersReactionCallback(t *testing.T) {
+	channel := &fakeOAPIChannel{}
+	transport, err := NewOAPITransport(OAPITransportOptions{channel: channel})
+	if err != nil {
+		t.Fatalf("NewOAPITransport error = %v", err)
+	}
+	handler := &recordingLarkHandler{}
+	if err := transport.Connect(context.Background(), handler); err != nil {
+		t.Fatalf("Connect error = %v", err)
+	}
+	if channel.onReaction == nil {
+		t.Fatalf("reaction callback was not registered")
+	}
+	err = channel.onReaction(context.Background(), &channeltypes.ReactionEvent{
+		EventID:      "evt_reaction",
+		MessageID:    "om_source",
+		ReactionType: "Typing",
+		Action:       "add",
+	})
+	if err != nil {
+		t.Fatalf("reaction callback returned error: %v", err)
+	}
+	if len(handler.events) != 0 {
+		t.Fatalf("reaction callback emitted events = %#v, want none", handler.events)
+	}
+}
+
 func TestOAPITransportCanReconnectAfterDisconnectOrFailedStart(t *testing.T) {
 	channel := &fakeOAPIChannel{}
 	transport, err := NewOAPITransport(OAPITransportOptions{channel: channel})
@@ -727,6 +773,7 @@ type fakeOAPIChannel struct {
 	sends []channeltypes.SendInput
 
 	onMessage       func(context.Context, *channeltypes.NormalizedMessage) error
+	onReaction      func(context.Context, *channeltypes.ReactionEvent) error
 	onComment       func(context.Context, *channeltypes.CommentEvent) error
 	onCardAction    func(context.Context, *channeltypes.CardActionEvent) error
 	onReady         func()
@@ -749,6 +796,10 @@ func (c *fakeOAPIChannel) Send(_ context.Context, input *channeltypes.SendInput)
 
 func (c *fakeOAPIChannel) OnMessage(handler func(context.Context, *channeltypes.NormalizedMessage) error) {
 	c.onMessage = handler
+}
+
+func (c *fakeOAPIChannel) OnReaction(handler func(context.Context, *channeltypes.ReactionEvent) error) {
+	c.onReaction = handler
 }
 
 func (c *fakeOAPIChannel) OnComment(handler func(context.Context, *channeltypes.CommentEvent) error) {

@@ -42,6 +42,7 @@ type LarkManagedOptions struct {
 	MessageReplyMode    LarkReplyMode
 	ShowToolCalls       *bool
 	CommandOptions      CommandOptions
+	InitialOwnerOpenID  string
 	QuoteResolver       LarkQuoteResolver
 	CallbackAuth        *CallbackAuth
 	CallbackTTL         time.Duration

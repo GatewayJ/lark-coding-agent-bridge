@@ -149,6 +149,43 @@ func TestProfileBridgeTelemetryFromEnvIsExplicitOptIn(t *testing.T) {
 	}
 }
 
+func TestProfileBridgeLogDirOverridesDefaultJSONLDir(t *testing.T) {
+	root := t.TempDir()
+	paths, err := apppaths.Resolve(apppaths.Options{RootDir: root, Profile: "codex"})
+	if err != nil {
+		t.Fatalf("resolve paths: %v", err)
+	}
+	appConfig := larkcli.AppConfig{Accounts: larkcli.AccountsConfig{App: larkcli.AppCredentials{
+		ID:     "cli_profile_bridge",
+		Secret: "profile-secret",
+		Tenant: larkcli.TenantFeishu,
+	}}}
+	logDir := filepath.Join(root, "custom-logs")
+
+	logger, _ := profileBridgeObservability(context.Background(), ProfileBridgeOptions{
+		LogDir: logDir,
+	}, paths, appConfig)
+	if logger == nil {
+		t.Fatalf("logger is nil")
+	}
+	logger.Info("bridge.started", map[string]any{"profile": "codex"})
+
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("read custom log dir: %v", err)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "bridge-") || !strings.HasSuffix(entries[0].Name(), ".jsonl") {
+		t.Fatalf("custom log entries = %#v, want bridge-YYYYMMDD.jsonl", entries)
+	}
+	data, err := os.ReadFile(filepath.Join(logDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read custom log file: %v", err)
+	}
+	if !strings.Contains(string(data), `"phase":"bridge"`) || !strings.Contains(string(data), `"event":"started"`) {
+		t.Fatalf("log data = %s", data)
+	}
+}
+
 func writeProfileBridgeTestConfig(t *testing.T, root string, defaultWorkspace string) {
 	t.Helper()
 	config := map[string]any{

@@ -20,6 +20,7 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/channel/outbound"
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/scene/registration"
 	larkapplication "github.com/larksuite/oapi-sdk-go/v3/service/application/v6"
 	larkcardkit "github.com/larksuite/oapi-sdk-go/v3/service/cardkit/v1"
@@ -121,6 +122,7 @@ type OAPITransport struct {
 type oapiChannel interface {
 	Send(ctx context.Context, input *channeltypes.SendInput) (*channeltypes.SendResult, error)
 	OnMessage(handler func(ctx context.Context, msg *channeltypes.NormalizedMessage) error)
+	OnReaction(handler func(ctx context.Context, event *channeltypes.ReactionEvent) error)
 	OnComment(handler func(ctx context.Context, event *channeltypes.CommentEvent) error)
 	OnCardAction(handler func(ctx context.Context, event *channeltypes.CardActionEvent) error)
 	OnReady(handler func())
@@ -221,7 +223,9 @@ func newOAPIClient(options OAPITransportOptions) *larksdk.Client {
 }
 
 func newOAPIWSClient(options OAPITransportOptions) *larkws.Client {
-	opts := []larkws.ClientOption{}
+	opts := []larkws.ClientOption{
+		larkws.WithEventHandler(larkdispatcher.NewEventDispatcher("", "")),
+	}
 	if domain := oapiDomain(options); domain != "" {
 		opts = append(opts, larkws.WithDomain(domain))
 	}
@@ -481,19 +485,19 @@ func (t *OAPITransport) UpdateMessage(ctx context.Context, req UpdateMessageRequ
 	if req.MessageID == "" {
 		return ErrOAPIMessageMissing
 	}
-	content, err := patchMessageContent(req.Content)
+	msgType, content, err := updateMessageContent(req.Content)
 	if err != nil {
 		return err
 	}
-	resp, err := t.client.Im.V1.Message.Patch(ctx, larkim.NewPatchMessageReqBuilder().
+	resp, err := t.client.Im.V1.Message.Update(ctx, larkim.NewUpdateMessageReqBuilder().
 		MessageId(req.MessageID).
-		Body(larkim.NewPatchMessageReqBodyBuilder().Content(content).Build()).
+		Body(larkim.NewUpdateMessageReqBodyBuilder().MsgType(msgType).Content(content).Build()).
 		Build())
 	if err != nil {
 		return err
 	}
 	if !resp.Success() {
-		return oapiCodeError("patch message", resp.Code, resp.Msg)
+		return oapiCodeError("update message", resp.Code, resp.Msg)
 	}
 	return nil
 }
@@ -1243,6 +1247,9 @@ func (t *OAPITransport) registerCallbacks() {
 			Message: t.mapMessage(msg),
 		})
 	})
+	t.channel.OnReaction(func(ctx context.Context, event *channeltypes.ReactionEvent) error {
+		return nil
+	})
 	t.channel.OnComment(func(ctx context.Context, event *channeltypes.CommentEvent) error {
 		return t.emit(ctx, IncomingEvent{
 			Kind:    appintake.EventComment,
@@ -1562,16 +1569,16 @@ func directMessageContent(content MessageContent) (string, string, error) {
 	}
 }
 
-func patchMessageContent(content MessageContent) (string, error) {
+func updateMessageContent(content MessageContent) (string, string, error) {
 	switch {
 	case content.Markdown != "":
 		postJSON, err := larknormalize.SimpleMarkdownToPost("", content.Markdown, nil)
-		return postJSON, err
+		return "post", postJSON, err
 	case content.Text != "":
 		textJSON, err := json.Marshal(map[string]string{"text": content.Text})
-		return string(textJSON), err
+		return "text", string(textJSON), err
 	default:
-		return "", errors.New("lark message content is empty")
+		return "", "", errors.New("lark message content is empty")
 	}
 }
 

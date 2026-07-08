@@ -1219,6 +1219,42 @@ func TestBootstrapStartConfigCreatesCodexProfileWithEncryptedSecret(t *testing.T
 	}
 }
 
+func TestBuildBootstrapProfileConfigSeedsCreatorAsAdmin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake codex script uses POSIX sh")
+	}
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll bin: %v", err)
+	}
+	fakeCodex := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	previous := bootstrapAppCredentialResolver
+	bootstrapAppCredentialResolver = func(context.Context, startOptions) (string, string, larkcli.TenantBrand, string, error) {
+		return "cli_boot", "boot-secret", larkcli.TenantFeishu, " ou_creator ", nil
+	}
+	t.Cleanup(func() {
+		bootstrapAppCredentialResolver = previous
+	})
+
+	paths, err := apppaths.Resolve(apppaths.Options{RootDir: root, Profile: "codex"})
+	if err != nil {
+		t.Fatalf("Resolve returned error: %v", err)
+	}
+	profile, _, err := buildBootstrapProfileConfig(startOptions{Agent: "codex"}, paths)
+	if err != nil {
+		t.Fatalf("buildBootstrapProfileConfig returned error: %v", err)
+	}
+	if !containsString(profile.Access.Admins, "ou_creator") {
+		t.Fatalf("admins = %#v", profile.Access.Admins)
+	}
+}
+
 func TestBootstrapStartConfigRequiresAppCredentials(t *testing.T) {
 	root := t.TempDir()
 	paths, err := apppaths.Resolve(apppaths.Options{RootDir: root, Profile: "codex"})
