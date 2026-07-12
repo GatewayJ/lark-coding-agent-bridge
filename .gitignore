@@ -13,6 +13,7 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+.lark-channel-codex-feishu/
 
 # Local maintenance scripts and unreleased changelog are not part of the package
 scripts/*

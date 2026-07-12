@@ -11,8 +11,65 @@ import (
 
 	appcot "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/cotpresenter"
 	appimpresenter "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/impresenter"
+	appintake "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/intake"
+	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/domain/profile"
 	agentport "github.com/zarazhangrui/lark-coding-agent-bridge/internal/ports/agent"
 )
+
+func writeManagedRuntimeConfig(t *testing.T, allowedChats []string, requireMention bool) string {
+	t.Helper()
+	root := t.TempDir()
+	_, err := BootstrapProfileConfig(BootstrapProfileOptions{
+		RootDir:          root,
+		Profile:          "codex",
+		AgentKind:        ConfigAgentCodex,
+		AppID:            "cli_bridge_test",
+		AppSecret:        PlainSecret("secret"),
+		DefaultWorkspace: root,
+		Access: ConfigProfileAccess{
+			AllowedChats: append([]string(nil), allowedChats...),
+		},
+		RequireMention: &requireMention,
+	})
+	if err != nil {
+		t.Fatalf("BootstrapProfileConfig returned error: %v", err)
+	}
+	return filepath.Join(root, "config.json")
+}
+
+func updateManagedRuntimeAccess(t *testing.T, configPath string, mutate func(access *ConfigProfileAccess)) {
+	t.Helper()
+	snapshot, err := LoadConfig(configPath, ConfigLoadOptions{Profile: "codex", AgentKind: ConfigAgentCodex})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	prof, ok := snapshot.Root.Profiles["codex"]
+	if !ok {
+		t.Fatalf("config profile codex missing")
+	}
+	mutate(&prof.Access)
+	snapshot.Root.Profiles["codex"] = prof
+	if err := SaveConfig(configPath, snapshot.Root); err != nil {
+		t.Fatalf("SaveConfig returned error: %v", err)
+	}
+}
+
+func updateManagedRuntimeProfile(t *testing.T, configPath string, mutate func(profile *ConfigProfile)) {
+	t.Helper()
+	snapshot, err := LoadConfig(configPath, ConfigLoadOptions{Profile: "codex", AgentKind: ConfigAgentCodex})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	prof, ok := snapshot.Root.Profiles["codex"]
+	if !ok {
+		t.Fatalf("config profile codex missing")
+	}
+	mutate(&prof)
+	snapshot.Root.Profiles["codex"] = prof
+	if err := SaveConfig(configPath, snapshot.Root); err != nil {
+		t.Fatalf("SaveConfig returned error: %v", err)
+	}
+}
 
 func TestManagedLarkIntakeDefaultsQuoteResolverFromTransport(t *testing.T) {
 	transport := &quoteResolvingTransport{
@@ -63,6 +120,42 @@ func TestManagedLarkIntakeExplicitQuoteResolverWinsOverTransportDefault(t *testi
 	quotes := intake.resolveQuotedMessages(context.Background(), toInternalLarkScope(LarkMessageScope(msg)), toInternalLarkMessages([]LarkMessageInput{msg}))
 	if len(quotes) != 1 || quotes[0].Content != "explicit quote" || transport.called {
 		t.Fatalf("quotes = %#v transport.called=%v", quotes, transport.called)
+	}
+}
+
+func TestManagedLarkIntakeResolvesNonRootTopicReplyQuote(t *testing.T) {
+	targets := make(chan LarkQuoteTarget, 1)
+	intake := newManagedLarkIntake(managedLarkIntakeOptions{
+		Transport: NewFakeLarkTransport(LarkBotIdentity{}),
+		Managed: LarkManagedOptions{
+			QuoteResolver: LarkQuoteResolverFunc(func(_ context.Context, target LarkQuoteTarget) (BridgePromptQuotedMessage, bool, error) {
+				targets <- target
+				return BridgePromptQuotedMessage{MessageID: target.MessageID, RawContentType: "text", Content: "topic parent content"}, true, nil
+			}),
+		},
+	})
+
+	msg := LarkMessageInput{
+		MessageID:        "om_reply",
+		ChatID:           "oc_topic",
+		ChatType:         LarkChatTypeGroup,
+		ResolvedMode:     LarkChatModeTopic,
+		ThreadID:         "omt_topic",
+		RootID:           "om_topic_root",
+		ParentID:         "om_topic_parent",
+		ReplyToMessageID: "om_topic_parent",
+	}
+	quotes := intake.resolveQuotedMessages(context.Background(), toInternalLarkScope(LarkMessageScope(msg)), toInternalLarkMessages([]LarkMessageInput{msg}))
+	if len(quotes) != 1 || quotes[0].Content != "topic parent content" {
+		t.Fatalf("quotes = %#v", quotes)
+	}
+	select {
+	case target := <-targets:
+		if target.MessageID != "om_topic_parent" || target.ThreadID != "omt_topic" || target.RootID != "om_topic_root" || target.ParentID != "om_topic_parent" {
+			t.Fatalf("quote target = %#v", target)
+		}
+	default:
+		t.Fatal("quote resolver was not called")
 	}
 }
 
@@ -238,46 +331,262 @@ func TestManagedLarkIntakeUsesFetchedKnownChatsInConfigCard(t *testing.T) {
 	})
 	defer intake.Close()
 
-	opts := intake.configCardOptions(context.Background(), &CommandConfigView{Snapshot: CommandConfigSnapshotView{
+	opts, err := intake.configCardOptions(context.Background(), &CommandConfigView{Snapshot: CommandConfigSnapshotView{
 		MessageReply: "markdown",
 		CotMessages:  "detailed",
 	}})
+	if err != nil {
+		t.Fatalf("configCardOptions returned error: %v", err)
+	}
 	if len(opts.KnownChats) != 1 || opts.KnownChats[0].ID != "oc_group" || opts.KnownChats[0].Name != "工程群" {
 		t.Fatalf("config known chats = %#v", opts.KnownChats)
 	}
 }
 
-func TestManagedLarkIntakeAppliesSavedConfigRuntimeOptions(t *testing.T) {
-	showTools := true
-	intake := newManagedLarkIntake(managedLarkIntakeOptions{
-		Managed: LarkManagedOptions{
-			MessageReplyMode: LarkReplyCard,
-			ShowToolCalls:    &showTools,
-			CommandOptions: CommandOptions{
-				GlobalIdleTimeout: 5 * time.Minute,
-			},
-		},
+func TestManagedLarkIntakeReadsPresentationOptionsFromConfigFile(t *testing.T) {
+	configPath := writeManagedRuntimeConfig(t, []string{"oc_group"}, true)
+	client, err := NewCodexClient(CodexClientOptions{Binary: "codex", ProfileStateDir: t.TempDir(), SessionStorePath: filepath.Join(t.TempDir(), "sessions.json"), SessionCatalogPath: filepath.Join(t.TempDir(), "sessions.catalog.json")})
+	if err != nil {
+		t.Fatalf("NewCodexClient returned error: %v", err)
+	}
+	intake := newManagedLarkIntake(managedLarkIntakeOptions{Client: client, Managed: LarkManagedOptions{CommandOptions: CommandOptions{ProfileName: "codex", ConfigPath: configPath}}})
+	updateManagedRuntimeProfile(t, configPath, func(profile *ConfigProfile) {
+		profile.Preferences = map[string]any{
+			"messageReply":          "text",
+			"messageReplyMigrated":  true,
+			"showToolCalls":         false,
+			"cotMessages":           "detailed",
+			"runIdleTimeoutMinutes": 17,
+		}
 	})
 
-	intake.applySavedConfigRuntime(CommandResponse{
-		Kind: CommandResponseConfig,
-		Config: &CommandConfigView{
-			Saved: true,
-			Snapshot: CommandConfigSnapshotView{
-				MessageReply:          "text",
-				ShowToolCalls:         false,
-				CotMessages:           "detailed",
-				RunIdleTimeoutMinutes: 17,
-			},
-		},
-	})
-
-	replyMode, showToolCalls, idleTimeout, cotMessages := intake.currentPresentationOptions("oc_group")
+	runtime, err := intake.loadRuntimeConfig()
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig returned error: %v", err)
+	}
+	replyMode, showToolCalls, idleTimeout, cotMessages := intake.presentationOptions(runtime, "oc_group")
 	if replyMode != "text" || showToolCalls || idleTimeout != 17*time.Minute || cotMessages != "detailed" {
 		t.Fatalf("presentation options = %q %v %s %q", replyMode, showToolCalls, idleTimeout, cotMessages)
 	}
-	if got := intake.currentCommandOptions().GlobalIdleTimeout; got != 17*time.Minute {
-		t.Fatalf("global idle timeout = %s", got)
+}
+
+func TestManagedLarkIntakeReadsAllowedChatsFromConfigFile(t *testing.T) {
+	configPath := writeManagedRuntimeConfig(t, nil, true)
+	client, err := NewCodexClient(CodexClientOptions{
+		Binary:             "codex",
+		ProfileStateDir:    t.TempDir(),
+		SessionStorePath:   filepath.Join(t.TempDir(), "sessions.json"),
+		SessionCatalogPath: filepath.Join(t.TempDir(), "sessions.catalog.json"),
+	})
+	if err != nil {
+		t.Fatalf("NewCodexClient returned error: %v", err)
+	}
+	intake := newManagedLarkIntake(managedLarkIntakeOptions{
+		Client: client,
+		Managed: LarkManagedOptions{CommandOptions: CommandOptions{
+			ProfileName: "codex",
+			ConfigPath:  configPath,
+		}},
+	})
+	msg := appintake.MessageInput{
+		ChatID:   "oc_group",
+		ChatType: appintake.ChatTypeGroup,
+		Sender:   appintake.Actor{OpenID: "ou_user"},
+	}
+
+	runtime, err := intake.loadRuntimeConfig()
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig returned error: %v", err)
+	}
+	decision := intake.messageAccessDecisionWithProfile(msg, runtime.profile)
+	if decision.OK || decision.Reason != AccessDeniedChat {
+		t.Fatalf("decision before config update = %#v, want denied chat", decision)
+	}
+
+	updateManagedRuntimeAccess(t, configPath, func(access *ConfigProfileAccess) {
+		access.AllowedChats = []string{"oc_group"}
+	})
+
+	runtime, err = intake.loadRuntimeConfig()
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig returned error: %v", err)
+	}
+	decision = intake.messageAccessDecisionWithProfile(msg, runtime.profile)
+	if !decision.OK || decision.Reason != AccessAllowedChat {
+		t.Fatalf("decision after config update = %#v, want allowed chat", decision)
+	}
+}
+
+func TestManagedLarkIntakeReadsRequireMentionFromConfigFile(t *testing.T) {
+	configPath := writeManagedRuntimeConfig(t, []string{"oc_group"}, true)
+	client, err := NewCodexClient(CodexClientOptions{
+		Binary:             "codex",
+		ProfileStateDir:    t.TempDir(),
+		SessionStorePath:   filepath.Join(t.TempDir(), "sessions.json"),
+		SessionCatalogPath: filepath.Join(t.TempDir(), "sessions.catalog.json"),
+	})
+	if err != nil {
+		t.Fatalf("NewCodexClient returned error: %v", err)
+	}
+	intake := newManagedLarkIntake(managedLarkIntakeOptions{
+		Client: client,
+		Managed: LarkManagedOptions{CommandOptions: CommandOptions{
+			ProfileName: "codex",
+			ConfigPath:  configPath,
+		}},
+	})
+
+	runtime, err := intake.loadRuntimeConfig()
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig returned error: %v", err)
+	}
+	if !runtime.profile.Access.RequireMentionInGroup {
+		t.Fatalf("RequireMentionInGroup before config update = false, want true")
+	}
+
+	updateManagedRuntimeAccess(t, configPath, func(access *ConfigProfileAccess) {
+		access.RequireMentionInGroup = false
+	})
+
+	runtime, err = intake.loadRuntimeConfig()
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig returned error: %v", err)
+	}
+	if runtime.profile.Access.RequireMentionInGroup {
+		t.Fatalf("RequireMentionInGroup after config update = true, want false")
+	}
+}
+
+func TestManagedLarkIntakeReportsConfigReadFailureToFeishu(t *testing.T) {
+	client, err := NewCodexClient(CodexClientOptions{Binary: "codex", ProfileStateDir: t.TempDir(), SessionStorePath: filepath.Join(t.TempDir(), "sessions.json"), SessionCatalogPath: filepath.Join(t.TempDir(), "sessions.catalog.json")})
+	if err != nil {
+		t.Fatalf("NewCodexClient returned error: %v", err)
+	}
+	transport := NewFakeLarkTransport(LarkBotIdentity{})
+	intake := newManagedLarkIntake(managedLarkIntakeOptions{
+		Client:    client,
+		Transport: transport,
+		Managed:   LarkManagedOptions{CommandOptions: CommandOptions{ProfileName: "codex", ConfigPath: filepath.Join(t.TempDir(), "missing.json")}},
+	})
+	event := appintake.NormalizedEvent{
+		Scope: appintake.Scope{Key: "ou_user", ChatMode: appintake.ChatModeP2P},
+		Message: &appintake.MessageInput{
+			MessageID: "om_config_error",
+			ChatID:    "ou_user",
+			ChatType:  appintake.ChatTypeP2P,
+			Content:   "hello",
+		},
+	}
+	if err := intake.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+	sent := transport.SentMessageSnapshot()
+	if len(sent) != 1 || !strings.Contains(sent[0].Content.Markdown, "服务配置读取失败") {
+		t.Fatalf("config read failure reply = %#v", sent)
+	}
+}
+
+func TestManagedLarkIntakeUsesFreshConfigForAdminCommand(t *testing.T) {
+	configPath := writeManagedRuntimeConfig(t, nil, true)
+	updateManagedRuntimeProfile(t, configPath, func(profile *ConfigProfile) {
+		profile.Access.Admins = []string{"ou_admin"}
+	})
+	client, err := NewCodexClient(CodexClientOptions{Binary: "codex", ProfileStateDir: t.TempDir(), SessionStorePath: filepath.Join(t.TempDir(), "sessions.json"), SessionCatalogPath: filepath.Join(t.TempDir(), "sessions.catalog.json")})
+	if err != nil {
+		t.Fatalf("NewCodexClient returned error: %v", err)
+	}
+	transport := NewFakeLarkTransport(LarkBotIdentity{})
+	intake := newManagedLarkIntake(managedLarkIntakeOptions{
+		Client:    client,
+		Transport: transport,
+		Managed:   LarkManagedOptions{CommandOptions: CommandOptions{ProfileName: "codex", ConfigPath: configPath}},
+	})
+	event := appintake.NormalizedEvent{
+		Scope: appintake.Scope{Key: "oc_target", ChatMode: appintake.ChatModeGroup},
+		Message: &appintake.MessageInput{
+			MessageID:    "om_invite",
+			ChatID:       "oc_target",
+			ChatType:     appintake.ChatTypeGroup,
+			Content:      "/invite group",
+			MentionedBot: true,
+			Sender:       appintake.Actor{OpenID: "ou_admin"},
+		},
+	}
+	if err := intake.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+	snapshot, err := LoadConfig(configPath, ConfigLoadOptions{Profile: "codex", AgentKind: ConfigAgentCodex})
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if !containsString(snapshot.Root.Profiles["codex"].Access.AllowedChats, "oc_target") {
+		t.Fatalf("allowed chats = %#v, want oc_target", snapshot.Root.Profiles["codex"].Access.AllowedChats)
+	}
+}
+
+func TestManagedLarkIntakeDefersMergeForwardExpansionUntilAfterAccess(t *testing.T) {
+	configPath := writeManagedRuntimeConfig(t, nil, true)
+	client, err := NewCodexClient(CodexClientOptions{Binary: "codex", ProfileStateDir: t.TempDir(), SessionStorePath: filepath.Join(t.TempDir(), "sessions.json"), SessionCatalogPath: filepath.Join(t.TempDir(), "sessions.catalog.json")})
+	if err != nil {
+		t.Fatalf("NewCodexClient returned error: %v", err)
+	}
+	resolved := 0
+	intake := newManagedLarkIntake(managedLarkIntakeOptions{
+		Client: client,
+		Managed: LarkManagedOptions{
+			CommandOptions: CommandOptions{ProfileName: "codex", ConfigPath: configPath},
+			QuoteResolver: LarkQuoteResolverFunc(func(context.Context, LarkQuoteTarget) (BridgePromptQuotedMessage, bool, error) {
+				resolved++
+				return BridgePromptQuotedMessage{Content: "expanded"}, true, nil
+			}),
+		},
+	})
+	event := appintake.NormalizedEvent{
+		Scope: appintake.Scope{Key: "oc_denied", ChatMode: appintake.ChatModeGroup},
+		Message: &appintake.MessageInput{
+			MessageID:      "om_forward",
+			ChatID:         "oc_denied",
+			ChatType:       appintake.ChatTypeGroup,
+			RawContentType: "merge_forward",
+			Content:        "Merged and Forwarded Message",
+			MentionedBot:   true,
+			Sender:         appintake.Actor{OpenID: "ou_user"},
+		},
+	}
+	if err := intake.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage returned error: %v", err)
+	}
+	if resolved != 0 {
+		t.Fatalf("merge_forward resolver calls = %d, want 0 before access", resolved)
+	}
+}
+
+func TestManagedLarkIntakeResolvesAuthorizedMergeForward(t *testing.T) {
+	intake := newManagedLarkIntake(managedLarkIntakeOptions{Managed: LarkManagedOptions{
+		QuoteResolver: LarkQuoteResolverFunc(func(_ context.Context, target LarkQuoteTarget) (BridgePromptQuotedMessage, bool, error) {
+			if target.MessageID != "om_forward" {
+				t.Fatalf("target message id = %q", target.MessageID)
+			}
+			return BridgePromptQuotedMessage{Content: "<forwarded_messages>expanded</forwarded_messages>"}, true, nil
+		}),
+	}})
+	messages := intake.resolveMergedForwardMessages(context.Background(), appintake.Scope{Key: "oc_allowed"}, []appintake.MessageInput{{MessageID: "om_forward", ChatID: "oc_allowed", RawContentType: "merge_forward", Content: "Merged and Forwarded Message"}})
+	if len(messages) != 1 || !strings.Contains(messages[0].Content, "expanded") {
+		t.Fatalf("resolved messages = %#v", messages)
+	}
+}
+
+func TestClientCardCommandHandlerUsesProvidedProfile(t *testing.T) {
+	client, err := NewCodexClient(CodexClientOptions{Binary: "codex", ProfileStateDir: t.TempDir(), SessionStorePath: filepath.Join(t.TempDir(), "sessions.json"), SessionCatalogPath: filepath.Join(t.TempDir(), "sessions.catalog.json")})
+	if err != nil {
+		t.Fatalf("NewCodexClient returned error: %v", err)
+	}
+	runtimeProfile := profile.DefaultConfig(profile.AgentCodex)
+	runtimeProfile.Access.Admins = []string{"ou_admin"}
+	handler := clientCardCommandHandler{client: client, profileConfig: &runtimeProfile}
+	decision := handler.accessDecision(CardCommandRequest{ChatMode: LarkChatModeGroup, ChatID: "oc_group", SenderID: "ou_admin"})
+	if !decision.OK || decision.Reason != AccessAllowedAdmin {
+		t.Fatalf("card action decision = %#v, want allowed admin", decision)
 	}
 }
 

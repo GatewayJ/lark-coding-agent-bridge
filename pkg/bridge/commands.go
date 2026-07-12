@@ -8,6 +8,7 @@ import (
 	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/commands"
 	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/runexecutor"
 	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/domain/access"
+	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/domain/profile"
 )
 
 type CommandRequest struct {
@@ -443,15 +444,24 @@ func (h *CommandHandler) HandleCommand(ctx context.Context, req CommandRequest, 
 	if state == nil {
 		state = newCommandServiceState()
 	}
-	return handleCommandWithState(ctx, h.client, state, req, opts)
+	return handleCommandWithState(ctx, h.client, state, req, opts, h.client.profile)
 }
 
 func (c *Client) HandleCommand(ctx context.Context, req CommandRequest, opts CommandOptions) (CommandResponse, error) {
 	if c == nil {
 		return CommandResponse{}, ErrNilClient
 	}
+	return c.HandleCommandWithProfile(ctx, req, opts, c.profile)
+}
+
+// HandleCommandWithProfile handles one command using the supplied profile
+// snapshot without mutating the long-lived Client configuration.
+func (c *Client) HandleCommandWithProfile(ctx context.Context, req CommandRequest, opts CommandOptions, profileConfig profile.Config) (CommandResponse, error) {
+	if c == nil {
+		return CommandResponse{}, ErrNilClient
+	}
 	state := commandServiceStateForClient(c)
-	return handleCommandWithState(ctx, c, state, req, opts)
+	return handleCommandWithState(ctx, c, state, req, opts, profileConfig)
 }
 
 // ReleaseCommandState clears the backwards-compatible command state owned by
@@ -464,11 +474,11 @@ func (c *Client) ReleaseCommandState() {
 	bridgeCommandServices.Delete(commandServiceKey{client: c})
 }
 
-func handleCommandWithState(ctx context.Context, c *Client, state *commandServiceState, req CommandRequest, opts CommandOptions) (CommandResponse, error) {
+func handleCommandWithState(ctx context.Context, c *Client, state *commandServiceState, req CommandRequest, opts CommandOptions, profileConfig profile.Config) (CommandResponse, error) {
 	if req.Access.OK && !req.Access.trusted {
 		return CommandResponse{}, ErrUntrustedAccessDecision
 	}
-	service := commandServiceWithState(c, state, opts)
+	service := commandServiceWithState(c, state, opts, profileConfig)
 	response, err := service.Handle(ctx, commands.Request{
 		CommandText: req.CommandText,
 		Command:     req.Command,
@@ -498,7 +508,7 @@ func commandServiceStateForClient(c *Client) *commandServiceState {
 	return value.(*commandServiceState)
 }
 
-func commandServiceWithState(c *Client, state *commandServiceState, opts CommandOptions) *commands.Service {
+func commandServiceWithState(c *Client, state *commandServiceState, opts CommandOptions, profileConfig profile.Config) *commands.Service {
 	if state == nil {
 		state = newCommandServiceState()
 	}
@@ -534,14 +544,14 @@ func commandServiceWithState(c *Client, state *commandServiceState, opts Command
 	}
 	return commands.New(commands.Options{
 		ProfileName:       defaultProfileName(opts.ProfileName),
-		ProfileConfig:     c.profile,
+		ProfileConfig:     profileConfig,
 		Capability:        c.cap,
 		RuntimeControls:   toInternalRuntimeControls(opts.RuntimeControls),
 		Sessions:          c.sessions,
 		SessionCatalog:    c.catalog,
 		Workspaces:        commandWorkspaceAdapter{delegate: workspaces},
 		Executor:          c.executor,
-		CodexHistory:      codexHistoryAdapter{client: c},
+		CodexHistory:      codexHistoryAdapter{client: c, profileConfig: profileConfig},
 		Processes:         processListerAdapter{delegate: opts.Processes},
 		ProcessController: processController,
 		Reconnector:       reconnector,
@@ -648,14 +658,15 @@ func newCommandServiceState() *commandServiceState {
 }
 
 type codexHistoryAdapter struct {
-	client *Client
+	client        *Client
+	profileConfig profile.Config
 }
 
 func (a codexHistoryAdapter) ListCodexThreads(ctx context.Context, query commands.CodexHistoryQuery) ([]commands.CodexThreadHistoryEntry, error) {
-	entries, err := a.client.ListCodexThreads(ctx, CodexHistoryOptions{
+	entries, err := a.client.ListCodexThreadsWithProfile(ctx, CodexHistoryOptions{
 		CWD:   query.CWD,
 		Limit: query.Limit,
-	})
+	}, a.profileConfig)
 	if err != nil {
 		return nil, err
 	}

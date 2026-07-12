@@ -12,11 +12,13 @@ import (
 
 	appcardkit "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/cardkit"
 	appcardrender "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/cardrender"
+	appconfigstore "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/configstore"
 	appcot "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/cotpresenter"
 	appimpresenter "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/impresenter"
 	appintake "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/intake"
 	appmedia "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/media"
 	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/domain/access"
+	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/domain/profile"
 	agentport "github.com/zarazhangrui/lark-coding-agent-bridge/internal/ports/agent"
 )
 
@@ -27,6 +29,7 @@ const defaultManagedCloseTimeout = 5 * time.Second
 const defaultManagedInfoRefreshInterval = 30 * time.Minute
 const defaultManagedReactionCleanupGrace = time.Second
 const managedAccountReconnectDedupTTL = 5 * time.Minute
+const managedRuntimeConfigFailureMessage = "服务配置读取失败，暂不处理这条消息。请联系管理员检查 bridge 配置。"
 
 type managedLarkIntake struct {
 	client    *Client
@@ -276,18 +279,16 @@ func (i *managedLarkIntake) updateCommandOptions(update func(*CommandOptions)) {
 	update(&i.commandOptions)
 }
 
-func (i *managedLarkIntake) currentPresentationOptions(scopeID string) (appimpresenter.ReplyMode, bool, time.Duration, appcot.Mode) {
-	if i == nil {
-		return appimpresenter.ReplyMarkdown, true, 0, appcot.ModeOff
-	}
-	i.presentationMu.RLock()
-	replyMode := i.replyMode
-	showToolCalls := i.showToolCalls
-	cotMessages := i.cotMessages
-	i.presentationMu.RUnlock()
+type managedRuntimeConfig struct {
+	profile       profile.Config
+	replyMode     appimpresenter.ReplyMode
+	showToolCalls bool
+	cotMessages   appcot.Mode
+	idleTimeout   time.Duration
+}
 
-	commandOptions := i.currentCommandOptions()
-	timeout := commandOptions.GlobalIdleTimeout
+func (i *managedLarkIntake) presentationOptions(runtime managedRuntimeConfig, scopeID string) (appimpresenter.ReplyMode, bool, time.Duration, appcot.Mode) {
+	timeout := runtime.idleTimeout
 	if i.client != nil && i.client.sessions != nil {
 		if minutes, ok := i.client.sessions.GetIdleTimeoutMinutes(scopeID); ok {
 			if minutes > 0 {
@@ -297,27 +298,114 @@ func (i *managedLarkIntake) currentPresentationOptions(scopeID string) (appimpre
 			}
 		}
 	}
-	return appimpresenter.ReplyMode(replyMode), showToolCalls, timeout, cotMessages
+	return runtime.replyMode, runtime.showToolCalls, timeout, runtime.cotMessages
 }
 
-func (i *managedLarkIntake) applySavedConfigRuntime(response CommandResponse) {
-	if i == nil || response.Kind != CommandResponseConfig || response.Config == nil || !response.Config.Saved || response.Config.Failure != "" {
+func (i *managedLarkIntake) legacyRuntimeConfig() managedRuntimeConfig {
+	if i == nil || i.client == nil {
+		return managedRuntimeConfig{replyMode: appimpresenter.ReplyMarkdown, showToolCalls: true}
+	}
+	i.presentationMu.RLock()
+	replyMode := i.replyMode
+	showToolCalls := i.showToolCalls
+	cotMessages := i.cotMessages
+	i.presentationMu.RUnlock()
+	return managedRuntimeConfig{
+		profile:       i.client.profile,
+		replyMode:     appimpresenter.ReplyMode(replyMode),
+		showToolCalls: showToolCalls,
+		cotMessages:   cotMessages,
+		idleTimeout:   i.currentCommandOptions().GlobalIdleTimeout,
+	}
+}
+
+func (i *managedLarkIntake) loadRuntimeConfig() (managedRuntimeConfig, error) {
+	if i == nil || i.client == nil {
+		return managedRuntimeConfig{}, ErrNilClient
+	}
+	commandOptions := i.currentCommandOptions()
+	if commandOptions.ConfigPath == "" {
+		return i.legacyRuntimeConfig(), nil
+	}
+	loadOptions := appconfigstore.LoadOptions{Profile: commandOptions.ProfileName}
+	if i.client.profile.AgentKind == profile.AgentClaude {
+		loadOptions.AgentKind = appconfigstore.AgentClaude
+	} else {
+		loadOptions.AgentKind = appconfigstore.AgentCodex
+	}
+	snapshot, err := appconfigstore.Load(commandOptions.ConfigPath, loadOptions)
+	if err != nil {
+		return managedRuntimeConfig{}, err
+	}
+	return managedRuntimeConfigFromStore(snapshot.Profile), nil
+}
+
+func managedRuntimeConfigFromStore(prof appconfigstore.ProfileConfig) managedRuntimeConfig {
+	return managedRuntimeConfig{
+		profile:       managedProfileConfigFromStore(prof),
+		replyMode:     appimpresenter.ReplyMode(normalizeLarkReplyMode(LarkReplyMode(managedPreferenceMessageReply(prof.Preferences)))),
+		showToolCalls: managedPreferenceShowToolCalls(prof.Preferences),
+		cotMessages:   managedCotMessagesSnapshot(managedPreferenceCotMessages(prof.Preferences)),
+		idleTimeout:   time.Duration(managedPreferenceRunIdleTimeoutMinutes(prof.Preferences)) * time.Minute,
+	}
+}
+
+func (i *managedLarkIntake) notifyRuntimeConfigFailure(ctx context.Context, msg appintake.MessageInput, scope appintake.Scope, err error) {
+	i.recordError(ctx, err, map[string]any{"phase": "managed_profile_reload", "scope": scope.Key})
+	if msg.ChatType != appintake.ChatTypeP2P && !msg.MentionedBot {
 		return
 	}
-	snapshot := response.Config.Snapshot
-	i.presentationMu.Lock()
-	i.replyMode = normalizeLarkReplyMode(LarkReplyMode(snapshot.MessageReply))
-	i.showToolCalls = snapshot.ShowToolCalls
-	i.cotMessages = managedCotMessagesSnapshot(snapshot.CotMessages)
-	i.presentationMu.Unlock()
+	if sendErr := i.sendMarkdown(ctx, msg.ChatID, managedRuntimeConfigFailureMessage, managedReplyOptions(msg, scope)); sendErr != nil {
+		i.recordError(ctx, sendErr, map[string]any{"phase": "managed_profile_reload_reply", "scope": scope.Key})
+	}
+}
 
-	i.updateCommandOptions(func(options *CommandOptions) {
-		if snapshot.RunIdleTimeoutMinutes > 0 {
-			options.GlobalIdleTimeout = time.Duration(snapshot.RunIdleTimeoutMinutes) * time.Minute
-		} else {
-			options.GlobalIdleTimeout = 0
-		}
-	})
+func managedProfileConfigFromStore(prof appconfigstore.ProfileConfig) profile.Config {
+	return profile.Config{
+		SchemaVersion:    prof.SchemaVersion,
+		AgentKind:        profile.AgentKind(prof.AgentKind),
+		Access:           managedAccessFromStore(prof.Access),
+		Workspaces:       profile.Workspaces{Default: prof.Workspaces.Default},
+		Permissions:      prof.Permissions,
+		PermissionSource: prof.PermissionSource,
+		Codex:            managedCodexFromStore(prof.Codex),
+		Attachments: profile.AttachmentConfig{
+			MaxCount:      prof.Attachments.MaxCount,
+			MaxBytes:      prof.Attachments.MaxBytes,
+			MaxFileBytes:  prof.Attachments.MaxFileBytes,
+			ImageMaxBytes: prof.Attachments.ImageMaxBytes,
+			CacheTTLMS:    prof.Attachments.CacheTTLMS,
+			CacheMaxBytes: prof.Attachments.CacheMaxBytes,
+		},
+		LarkCli: profile.LarkCliConfig{IdentityPreset: profile.LarkCliIdentityPreset(prof.LarkCli.IdentityPreset)},
+	}
+}
+
+func managedAccessFromStore(input appconfigstore.ProfileAccess) profile.Access {
+	return profile.Access{
+		AllowedUsers:          append([]string(nil), input.AllowedUsers...),
+		AllowedChats:          append([]string(nil), input.AllowedChats...),
+		Admins:                append([]string(nil), input.Admins...),
+		RequireMentionInGroup: input.RequireMentionInGroup,
+	}
+}
+
+func managedCodexFromStore(input *appconfigstore.CodexConfig) *profile.CodexConfig {
+	if input == nil {
+		return nil
+	}
+	return &profile.CodexConfig{
+		BinaryPath:       input.BinaryPath,
+		Realpath:         input.Realpath,
+		Version:          input.Version,
+		SHA256:           input.SHA256,
+		Owner:            input.Owner,
+		Mode:             input.Mode,
+		CodexHome:        input.CodexHome,
+		InheritCodexHome: input.InheritCodexHome,
+		IgnoreUserConfig: input.IgnoreUserConfig,
+		IgnoreRules:      input.IgnoreRules,
+	}
 }
 
 func (i *managedLarkIntake) ensureRuntimeInfo(ctx context.Context) {
@@ -426,7 +514,12 @@ func (i *managedLarkIntake) handleMessage(ctx context.Context, event appintake.N
 		return ErrMissingLarkEventPayload
 	}
 	msg := *event.Message
-	decision := i.messageAccessDecision(msg)
+	runtimeConfig, err := i.loadRuntimeConfig()
+	if err != nil {
+		i.notifyRuntimeConfigFailure(ctx, msg, event.Scope, err)
+		return nil
+	}
+	decision := i.messageAccessDecisionWithProfile(msg, runtimeConfig.profile)
 	if !decision.OK {
 		i.recordInfo(ctx, "lark.message.ignored", managedMessageDecisionFields(msg, decision.Reason))
 		if msg.ChatType != appintake.ChatTypeP2P && decision.Reason == AccessDeniedChat && msg.MentionedBot {
@@ -434,14 +527,15 @@ func (i *managedLarkIntake) handleMessage(ctx context.Context, event appintake.N
 		}
 		return nil
 	}
-	if msg.ChatType != appintake.ChatTypeP2P && i.client.profile.Access.RequireMentionInGroup && !msg.MentionedBot {
+	if msg.ChatType != appintake.ChatTypeP2P && runtimeConfig.profile.Access.RequireMentionInGroup && !msg.MentionedBot {
 		i.recordInfo(ctx, "lark.message.ignored", managedMessageDecisionFields(msg, "missing-mention"))
 		return nil
 	}
 
 	i.refreshKnownChatsForCommand(ctx, msg.Content)
 	commandOptions := i.currentCommandOptions()
-	response, err := i.client.HandleCommand(ctx, CommandRequest{
+	commandOptions.GlobalIdleTimeout = runtimeConfig.idleTimeout
+	response, err := i.client.HandleCommandWithProfile(ctx, CommandRequest{
 		CommandText: msg.Content,
 		ScopeID:     event.Scope.Key,
 		ChatID:      msg.ChatID,
@@ -452,7 +546,7 @@ func (i *managedLarkIntake) handleMessage(ctx context.Context, event appintake.N
 		WorkingDir:  i.cwdFor(event.Scope.Key),
 		Access:      decision,
 		Mentions:    managedCommandMentions(msg.Mentions),
-	}, commandOptions)
+	}, commandOptions, runtimeConfig.profile)
 	if err != nil {
 		i.recordError(ctx, err, map[string]any{"phase": "managed_command", "scope": event.Scope.Key})
 		return nil
@@ -511,7 +605,15 @@ func (i *managedLarkIntake) Dispatch(ctx context.Context, input CardActionDispat
 		return CardActionDispatchResult{}, ErrNilClient
 	}
 	i.ensureRuntimeInfo(ctx)
-	decision := i.cardActionAccessDecision(input)
+	runtimeConfig, err := i.loadRuntimeConfig()
+	if err != nil {
+		scope := appintake.CardActionScope(toInternalLarkCardActionInput(input))
+		message := managedCardActionMessage(input, scope)
+		message.MentionedBot = true
+		i.notifyRuntimeConfigFailure(ctx, message, scope, err)
+		return CardActionDispatchResult{Outcome: CardDispatchRejected, RejectReason: "config-unavailable"}, nil
+	}
+	decision := i.cardActionAccessDecisionWithProfile(input, runtimeConfig.profile)
 	if !decision.OK {
 		return CardActionDispatchResult{
 			Outcome:      CardDispatchRejected,
@@ -524,7 +626,7 @@ func (i *managedLarkIntake) Dispatch(ctx context.Context, input CardActionDispat
 		submittedAt := time.Now()
 		input = cloneManagedCardActionInput(input)
 		if !i.startManagedTask(func(ctx context.Context) {
-			i.dispatchDetachedCardCommand(ctx, input, submittedAt)
+			i.dispatchDetachedCardCommand(ctx, input, submittedAt, runtimeConfig)
 		}) {
 			return CardActionDispatchResult{}, context.Canceled
 		}
@@ -535,7 +637,7 @@ func (i *managedLarkIntake) Dispatch(ctx context.Context, input CardActionDispat
 			Args:    args,
 		}, nil
 	}
-	return i.dispatchCardActionNow(ctx, input, time.Time{})
+	return i.dispatchCardActionNow(ctx, input, time.Time{}, runtimeConfig)
 }
 
 func cloneManagedCardActionInput(input CardActionDispatchInput) CardActionDispatchInput {
@@ -570,8 +672,8 @@ func cloneManagedValue(value any) any {
 	}
 }
 
-func (i *managedLarkIntake) dispatchDetachedCardCommand(ctx context.Context, input CardActionDispatchInput, submittedAt time.Time) {
-	result, err := i.dispatchCardActionNow(ctx, input, submittedAt)
+func (i *managedLarkIntake) dispatchDetachedCardCommand(ctx context.Context, input CardActionDispatchInput, submittedAt time.Time, runtimeConfig managedRuntimeConfig) {
+	result, err := i.dispatchCardActionNow(ctx, input, submittedAt, runtimeConfig)
 	fields := map[string]any{"phase": "managed_card_action_detached", "messageId": input.MessageID}
 	if cmd, _ := managedCardActionCommand(input); cmd != "" {
 		fields["command"] = cmd
@@ -586,9 +688,12 @@ func (i *managedLarkIntake) dispatchDetachedCardCommand(ctx context.Context, inp
 	}
 }
 
-func (i *managedLarkIntake) dispatchCardActionNow(ctx context.Context, input CardActionDispatchInput, submittedAt time.Time) (CardActionDispatchResult, error) {
+func (i *managedLarkIntake) dispatchCardActionNow(ctx context.Context, input CardActionDispatchInput, submittedAt time.Time, runtimeConfig managedRuntimeConfig) (CardActionDispatchResult, error) {
+	commandOptions := i.currentCommandOptions()
+	commandOptions.GlobalIdleTimeout = runtimeConfig.idleTimeout
 	result, err := i.client.HandleCardAction(ctx, input, CardActionOptions{
-		CommandOptions: i.currentCommandOptions(),
+		CommandOptions: commandOptions,
+		ProfileConfig:  &runtimeConfig.profile,
 		CallbackAuth:   i.callbackAuth,
 		ActiveRuns:     i,
 		Enqueuer: CardPromptEnqueuerFunc(func(ctx context.Context, event LarkNormalizedEvent) error {
@@ -670,7 +775,12 @@ func (i *managedLarkIntake) handleBatch(ctx context.Context, batch appintake.Bat
 	}
 	first := messages[0]
 	last := messages[len(messages)-1]
-	decision := i.messageAccessDecision(first)
+	runtimeConfig, err := i.loadRuntimeConfig()
+	if err != nil {
+		i.notifyRuntimeConfigFailure(ctx, first, batch.Scope, err)
+		return nil
+	}
+	decision := i.messageAccessDecisionWithProfile(first, runtimeConfig.profile)
 	if !decision.OK {
 		if first.ChatType != appintake.ChatTypeP2P && decision.Reason == AccessDeniedChat && first.MentionedBot {
 			i.sendNonAllowedGroupHint(ctx, first)
@@ -681,21 +791,22 @@ func (i *managedLarkIntake) handleBatch(ctx context.Context, batch appintake.Bat
 		i.queue.Block(batch.Scope.Key)
 		defer i.queue.Unblock(batch.Scope.Key)
 	}
-	attachments, err := i.resolveAttachments(ctx, messages)
+	messages = i.resolveMergedForwardMessages(ctx, batch.Scope, messages)
+	attachments, err := i.resolveAttachments(ctx, runtimeConfig.profile, messages)
 	if err != nil {
 		i.recordError(ctx, err, map[string]any{"phase": "managed_media", "scope": batch.Scope.Key})
 		return i.sendMarkdown(ctx, first.ChatID, "暂不支持处理这条消息里的附件。请先发纯文本，或使用支持媒体下载的 Lark transport。", managedReplyOptions(last, batch.Scope))
 	}
 	quotes := i.resolveQuotedMessages(ctx, batch.Scope, messages)
 
-	run, err := i.client.Run(ctx, RunInput{
+	run, err := i.client.RunWithProfile(ctx, RunInput{
 		ScopeID:     batch.Scope.Key,
 		Scope:       managedRunScope(first),
 		Prompt:      i.buildMessagePrompt(ctx, messages, attachments, quotes),
 		WorkingDir:  i.cwdFor(batch.Scope.Key),
 		Access:      decision,
 		Attachments: managedRunAttachments(attachments),
-	})
+	}, runtimeConfig.profile)
 	if err != nil {
 		if IsRejected(err) {
 			return i.sendMarkdown(ctx, first.ChatID, rejectedUserVisible(err), managedReplyOptions(last, batch.Scope))
@@ -706,7 +817,7 @@ func (i *managedLarkIntake) handleBatch(ctx context.Context, batch appintake.Bat
 
 	i.registerActiveRun(batch.Scope.Key, run.Metadata())
 	defer i.unregisterActiveRun(batch.Scope.Key, run.Metadata().RunID)
-	replyMode, showToolCalls, idleTimeout, cotMessages := i.currentPresentationOptions(batch.Scope.Key)
+	replyMode, showToolCalls, idleTimeout, cotMessages := i.presentationOptions(runtimeConfig, batch.Scope.Key)
 	reaction := i.addWorkingReaction(last.MessageID, replyMode, cotMessages)
 	defer i.scheduleWorkingReactionCleanup(last.MessageID, reaction)
 	_, err = i.presentRun(ctx, managedPresentInput{
@@ -902,7 +1013,7 @@ func (i *managedLarkIntake) buildMessagePrompt(ctx context.Context, messages []a
 	})
 }
 
-func (i *managedLarkIntake) resolveAttachments(ctx context.Context, messages []appintake.MessageInput) ([]appmedia.NormalizedAttachment, error) {
+func (i *managedLarkIntake) resolveAttachments(ctx context.Context, profileConfig profile.Config, messages []appintake.MessageInput) ([]appmedia.NormalizedAttachment, error) {
 	requests := managedResourceRequests(messages)
 	if len(requests) == 0 {
 		return nil, nil
@@ -910,7 +1021,7 @@ func (i *managedLarkIntake) resolveAttachments(ctx context.Context, messages []a
 	if i.media == nil {
 		return nil, errors.New("media downloader is required")
 	}
-	return i.media.Resolve(ctx, requests, appmedia.ResolveOptionsFromProfile(i.client.profile.Attachments))
+	return i.media.Resolve(ctx, requests, appmedia.ResolveOptionsFromProfile(profileConfig.Attachments))
 }
 
 func (i *managedLarkIntake) renderOptions(metadata RunMetadata, first appintake.MessageInput) appcardrender.RenderOptions {
@@ -1024,25 +1135,56 @@ func (i *managedLarkIntake) resolveQuotedMessages(ctx context.Context, scope app
 	return out
 }
 
-func (i *managedLarkIntake) messageAccessDecision(msg appintake.MessageInput) AccessDecision {
+func (i *managedLarkIntake) resolveMergedForwardMessages(ctx context.Context, scope appintake.Scope, messages []appintake.MessageInput) []appintake.MessageInput {
+	if i.quoteResolver == nil {
+		return messages
+	}
+	out := append([]appintake.MessageInput(nil), messages...)
+	for idx := range out {
+		msg := &out[idx]
+		if msg.RawContentType != "merge_forward" || msg.MessageID == "" {
+			continue
+		}
+		forwarded, ok, err := i.quoteResolver.ResolveLarkQuote(ctx, LarkQuoteTarget{
+			MessageID:       msg.MessageID,
+			ChatID:          msg.ChatID,
+			ChatType:        LarkChatType(msg.ChatType),
+			ResolvedMode:    LarkChatMode(msg.ResolvedMode),
+			ThreadID:        msg.ThreadID,
+			RootID:          msg.RootID,
+			ParentID:        msg.ParentID,
+			SourceMessageID: msg.MessageID,
+		})
+		if err != nil {
+			i.recordError(ctx, err, map[string]any{"phase": "managed_merge_forward", "messageId": msg.MessageID, "scope": scope.Key})
+			continue
+		}
+		if ok && strings.TrimSpace(forwarded.Content) != "" {
+			msg.Content = forwarded.Content
+		}
+	}
+	return out
+}
+
+func (i *managedLarkIntake) messageAccessDecisionWithProfile(msg appintake.MessageInput, profileConfig profile.Config) AccessDecision {
 	commandOptions := i.currentCommandOptions()
 	controls := toInternalRuntimeControls(commandOptions.RuntimeControls)
 	var decision access.Decision
 	if msg.ChatType == appintake.ChatTypeP2P {
-		decision = access.CanUseDM(i.client.profile, controls, msg.Sender.OpenID)
+		decision = access.CanUseDM(profileConfig, controls, msg.Sender.OpenID)
 	} else {
-		decision = access.CanUseGroup(i.client.profile, controls, msg.ChatID, msg.Sender.OpenID)
+		decision = access.CanUseGroup(profileConfig, controls, msg.ChatID, msg.Sender.OpenID)
 	}
 	return fromInternalAccessDecision(decision)
 }
 
-func (i *managedLarkIntake) cardActionAccessDecision(input CardActionDispatchInput) AccessDecision {
+func (i *managedLarkIntake) cardActionAccessDecisionWithProfile(input CardActionDispatchInput, profileConfig profile.Config) AccessDecision {
 	commandOptions := i.currentCommandOptions()
 	controls := toInternalRuntimeControls(commandOptions.RuntimeControls)
 	if input.ChatType == LarkChatTypeP2P || input.ResolvedMode == LarkChatModeP2P {
-		return fromInternalAccessDecision(access.CanUseDM(i.client.profile, controls, input.Operator.OpenID))
+		return fromInternalAccessDecision(access.CanUseDM(profileConfig, controls, input.Operator.OpenID))
 	}
-	return fromInternalAccessDecision(access.CanUseGroup(i.client.profile, controls, input.ChatID, input.Operator.OpenID))
+	return fromInternalAccessDecision(access.CanUseGroup(profileConfig, controls, input.ChatID, input.Operator.OpenID))
 }
 
 func managedCardActionMessage(input CardActionDispatchInput, scope appintake.Scope) appintake.MessageInput {
@@ -1076,7 +1218,6 @@ func (i *managedLarkIntake) sendCommandResponse(ctx context.Context, msg appinta
 	} else if !response.NoReply && strings.TrimSpace(response.Markdown) != "" {
 		err = i.sendMarkdown(ctx, msg.ChatID, response.Markdown, managedReplyOptions(msg, scope))
 	}
-	i.applySavedConfigRuntime(response)
 	i.scheduleAccountReconnect(msg, response)
 	i.scheduleGroupMsgScopeGrant(msg, response)
 	if err != nil {
@@ -1301,7 +1442,11 @@ func (i *managedLarkIntake) commandResponseCard(ctx context.Context, response Co
 }
 
 func (i *managedLarkIntake) configResponseCard(ctx context.Context, view *CommandConfigView) map[string]any {
-	opts := i.configCardOptions(ctx, view)
+	opts, err := i.configCardOptions(ctx, view)
+	if err != nil {
+		i.recordError(ctx, err, map[string]any{"phase": "managed_config_card"})
+		return appcardkit.ConfigFailedCard(managedRuntimeConfigFailureMessage)
+	}
 	switch {
 	case view.Failure != "":
 		return appcardkit.ConfigFailedCard(view.Failure)
@@ -1316,7 +1461,7 @@ func (i *managedLarkIntake) configResponseCard(ctx context.Context, view *Comman
 	}
 }
 
-func (i *managedLarkIntake) configCardOptions(ctx context.Context, view *CommandConfigView) appcardkit.ConfigFormOptions {
+func (i *managedLarkIntake) configCardOptions(ctx context.Context, view *CommandConfigView) (appcardkit.ConfigFormOptions, error) {
 	snapshot := view.Snapshot
 	i.refreshRuntimeKnownChatsIfEmpty(ctx)
 	commandOptions := i.currentCommandOptions()
@@ -1331,11 +1476,15 @@ func (i *managedLarkIntake) configCardOptions(ctx context.Context, view *Command
 		KnownChats:            managedKnownChats(commandOptions.KnownChats),
 	}
 	if i != nil && i.client != nil {
-		opts.AllowedUsers = append([]string(nil), i.client.profile.Access.AllowedUsers...)
-		opts.AllowedChats = append([]string(nil), i.client.profile.Access.AllowedChats...)
-		opts.Admins = append([]string(nil), i.client.profile.Access.Admins...)
+		runtimeConfig, err := i.loadRuntimeConfig()
+		if err != nil {
+			return opts, err
+		}
+		opts.AllowedUsers = append([]string(nil), runtimeConfig.profile.Access.AllowedUsers...)
+		opts.AllowedChats = append([]string(nil), runtimeConfig.profile.Access.AllowedChats...)
+		opts.Admins = append([]string(nil), runtimeConfig.profile.Access.Admins...)
 	}
-	return opts
+	return opts, nil
 }
 
 func accountResponseCard(view *CommandAccountView) map[string]any {
@@ -2104,6 +2253,60 @@ func managedCotMessagesMode(mode LarkCotMessagesMode) appcot.Mode {
 
 func managedCotMessagesSnapshot(raw string) appcot.Mode {
 	return managedCotMessagesString(raw)
+}
+
+func managedPreferenceMessageReply(prefs map[string]any) string {
+	raw, _ := prefs["messageReply"].(string)
+	if raw == "text" && prefs["messageReplyMigrated"] != true {
+		return "markdown"
+	}
+	switch raw {
+	case "card", "markdown", "text":
+		return raw
+	default:
+		return "markdown"
+	}
+}
+
+func managedPreferenceShowToolCalls(prefs map[string]any) bool {
+	value, ok := prefs["showToolCalls"].(bool)
+	return !ok || value
+}
+
+func managedPreferenceCotMessages(prefs map[string]any) string {
+	raw, _ := prefs["cotMessages"].(string)
+	switch raw {
+	case "brief", "simple":
+		return "brief"
+	case "detailed", "on":
+		return "detailed"
+	default:
+		return "off"
+	}
+}
+
+func managedPreferenceRunIdleTimeoutMinutes(prefs map[string]any) int {
+	value, ok := managedPreferenceNumber(prefs["runIdleTimeoutMinutes"])
+	if !ok || value <= 0 {
+		return 0
+	}
+	if value > 120 {
+		return 120
+	}
+	return int(value)
+}
+
+func managedPreferenceNumber(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case float64:
+		return typed, true
+	default:
+		return 0, false
+	}
 }
 
 func managedCotMessagesString(raw string) appcot.Mode {

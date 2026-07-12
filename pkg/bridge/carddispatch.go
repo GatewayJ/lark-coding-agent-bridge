@@ -8,6 +8,7 @@ import (
 	appdispatch "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/carddispatch"
 	appintake "github.com/zarazhangrui/lark-coding-agent-bridge/internal/app/intake"
 	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/domain/access"
+	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/domain/profile"
 )
 
 const (
@@ -174,6 +175,7 @@ func (d *CardActionDispatcher) Dispatch(ctx context.Context, input CardActionDis
 
 type CardActionOptions struct {
 	CommandOptions            CommandOptions
+	ProfileConfig             *profile.Config
 	CommandHandler            CardCommandHandler
 	CallbackAuth              *CallbackAuth
 	Verifier                  CardCallbackVerifier
@@ -191,7 +193,7 @@ func (c *Client) HandleCardAction(ctx context.Context, input CardActionDispatchI
 	}
 	handler := options.CommandHandler
 	if handler == nil {
-		handler = clientCardCommandHandler{client: c, options: options.CommandOptions}
+		handler = clientCardCommandHandler{client: c, options: options.CommandOptions, profileConfig: options.ProfileConfig}
 	}
 	verifier := options.Verifier
 	if verifier == nil && options.CallbackAuth != nil {
@@ -211,12 +213,13 @@ func (c *Client) HandleCardAction(ctx context.Context, input CardActionDispatchI
 }
 
 type clientCardCommandHandler struct {
-	client  *Client
-	options CommandOptions
+	client        *Client
+	options       CommandOptions
+	profileConfig *profile.Config
 }
 
 func (h clientCardCommandHandler) HandleCardCommand(ctx context.Context, req CardCommandRequest) (any, error) {
-	return h.client.HandleCommand(ctx, CommandRequest{
+	request := CommandRequest{
 		Command:   req.Command,
 		Args:      req.Args,
 		ScopeID:   req.ScopeID,
@@ -230,15 +233,23 @@ func (h clientCardCommandHandler) HandleCardCommand(ctx context.Context, req Car
 		FromCard:  req.FromCard,
 		MessageID: req.MessageID,
 		EventID:   req.EventID,
-	}, h.options)
+	}
+	if h.profileConfig != nil {
+		return h.client.HandleCommandWithProfile(ctx, request, h.options, *h.profileConfig)
+	}
+	return h.client.HandleCommand(ctx, request, h.options)
 }
 
 func (h clientCardCommandHandler) accessDecision(req CardCommandRequest) AccessDecision {
 	controls := toInternalRuntimeControls(h.options.RuntimeControls)
-	if req.ChatMode == LarkChatModeP2P {
-		return fromInternalAccessDecision(access.CanUseDM(h.client.profile, controls, req.SenderID))
+	profileConfig := h.client.profile
+	if h.profileConfig != nil {
+		profileConfig = *h.profileConfig
 	}
-	return fromInternalAccessDecision(access.CanUseGroup(h.client.profile, controls, req.ChatID, req.SenderID))
+	if req.ChatMode == LarkChatModeP2P {
+		return fromInternalAccessDecision(access.CanUseDM(profileConfig, controls, req.SenderID))
+	}
+	return fromInternalAccessDecision(access.CanUseGroup(profileConfig, controls, req.ChatID, req.SenderID))
 }
 
 type callbackAuthVerifier struct {

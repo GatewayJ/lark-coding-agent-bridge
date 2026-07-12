@@ -210,6 +210,16 @@ func (c *Client) Run(ctx context.Context, input RunInput) (*Run, error) {
 	if c == nil {
 		return nil, ErrNilClient
 	}
+	return c.RunWithProfile(ctx, input, c.profile)
+}
+
+// RunWithProfile starts a run with the configuration supplied for this
+// invocation. Hosts that reload profile configuration at runtime can avoid
+// mutating Client state by using this method.
+func (c *Client) RunWithProfile(ctx context.Context, input RunInput, profileConfig profile.Config) (*Run, error) {
+	if c == nil {
+		return nil, ErrNilClient
+	}
 	if input.ScopeID == "" {
 		return nil, errors.New("scopeId is required")
 	}
@@ -224,7 +234,7 @@ func (c *Client) Run(ctx context.Context, input RunInput) (*Run, error) {
 		Attachments:    toRunPolicyAttachments(input.Attachments),
 		Access:         toAccessDecision(input.Access),
 		Capability:     c.cap,
-		ProfileConfig:  c.profile,
+		ProfileConfig:  profileConfig,
 		Sessions:       c.sessions,
 		SessionCatalog: c.catalog,
 		Workspaces:     store,

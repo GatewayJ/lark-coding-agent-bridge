@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/adapters/codexhistory"
+	"github.com/zarazhangrui/lark-coding-agent-bridge/internal/domain/profile"
 )
 
 type CodexThreadSourceKind string
@@ -40,7 +41,16 @@ func (c *Client) ListCodexThreads(ctx context.Context, options CodexHistoryOptio
 	if c == nil {
 		return nil, ErrNilClient
 	}
-	listOptions := c.codexHistoryListOptions(options)
+	return c.ListCodexThreadsWithProfile(ctx, options, c.profile)
+}
+
+// ListCodexThreadsWithProfile lists history using the supplied profile
+// snapshot without changing the Client's long-lived configuration.
+func (c *Client) ListCodexThreadsWithProfile(ctx context.Context, options CodexHistoryOptions, profileConfig profile.Config) ([]CodexThreadHistoryEntry, error) {
+	if c == nil {
+		return nil, ErrNilClient
+	}
+	listOptions := c.codexHistoryListOptions(options, profileConfig)
 	entries, err := codexhistory.ListThreadHistory(ctx, listOptions)
 	if err != nil {
 		return nil, err
@@ -52,8 +62,8 @@ func (c *Client) ListCodexThreads(ctx context.Context, options CodexHistoryOptio
 	return out, nil
 }
 
-func (c *Client) codexHistoryListOptions(options CodexHistoryOptions) codexhistory.ListOptions {
-	cfg := c.profile.Codex
+func (c *Client) codexHistoryListOptions(options CodexHistoryOptions, profileConfig profile.Config) codexhistory.ListOptions {
+	cfg := profileConfig.Codex
 	listOptions := codexhistory.ListOptions{
 		CWD:             options.CWD,
 		Limit:           options.Limit,
@@ -71,7 +81,7 @@ func (c *Client) codexHistoryListOptions(options CodexHistoryOptions) codexhisto
 		listOptions.Binary = "codex"
 	}
 	if options.CWD == "" {
-		listOptions.CWD = c.profile.Workspaces.Default
+		listOptions.CWD = profileConfig.Workspaces.Default
 	}
 	if listOptions.CWD == "" {
 		listOptions.CWD = "."

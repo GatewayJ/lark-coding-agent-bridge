@@ -360,6 +360,76 @@ func TestOAPITransportMapsMessageRawThreadIDIntoTopicScope(t *testing.T) {
 	}
 }
 
+func TestOAPITransportMapsMessageRawThreadIDsFromMap(t *testing.T) {
+	transport := &OAPITransport{}
+	got := transport.mapMessage(&channeltypes.NormalizedMessage{
+		EventID:        "evt_map",
+		MessageID:      "om_reply",
+		ChatID:         "oc_topic",
+		ChatType:       "group",
+		UserID:         "ou_sender",
+		Content:        "hello topic",
+		RawContentType: "text",
+		RawEvent: map[string]any{
+			"event": map[string]any{
+				"message": map[string]any{
+					"thread_id": "omt_topic",
+					"root_id":   "om_root",
+					"parent_id": "om_parent",
+				},
+			},
+		},
+	})
+
+	if got == nil {
+		t.Fatalf("message is nil")
+	}
+	if got.ThreadID != "omt_topic" || got.RootID != "om_root" || got.ParentID != "om_parent" {
+		t.Fatalf("reply ids = thread %q root %q parent %q", got.ThreadID, got.RootID, got.ParentID)
+	}
+	if got.ReplyToMessageID != "om_parent" || got.ResolvedMode != appintake.ChatModeTopic {
+		t.Fatalf("reply target/mode = %q/%q", got.ReplyToMessageID, got.ResolvedMode)
+	}
+}
+
+func TestOAPITransportDefersIncomingMergeForwardExpansion(t *testing.T) {
+	server := newOAPICommentTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("incoming merge_forward must not fetch %s %s", r.Method, r.URL.String())
+	})
+	transport := newOAPICommentTestTransport(t, server)
+	channel := transport.channel.(*fakeOAPIChannel)
+	handler := &recordingLarkHandler{}
+	if err := transport.Connect(context.Background(), handler); err != nil {
+		t.Fatalf("Connect error = %v", err)
+	}
+
+	if err := channel.message(context.Background(), &channeltypes.NormalizedMessage{
+		EventID:        "evt_forward",
+		MessageID:      "om_forward",
+		ChatID:         "oc_group",
+		ChatType:       "group",
+		UserID:         "ou_sender",
+		Content:        "Merged and Forwarded Message",
+		RawContentType: "merge_forward",
+		RawEvent: map[string]any{
+			"event": map[string]any{
+				"message": map[string]any{
+					"message_id":   "om_forward",
+					"message_type": "merge_forward",
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("message callback error = %v", err)
+	}
+	if len(handler.events) != 1 || handler.events[0].Message == nil {
+		t.Fatalf("events = %#v, want one message", handler.events)
+	}
+	if content := handler.events[0].Message.Content; content != "Merged and Forwarded Message" {
+		t.Fatalf("merge_forward content = %q, want original placeholder", content)
+	}
+}
+
 func TestOAPITransportMapsCommentCardActionAndLifecycle(t *testing.T) {
 	channel := &fakeOAPIChannel{}
 	now := time.Unix(200, 0)

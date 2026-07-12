@@ -1756,11 +1756,54 @@ func unixMillis(ms int64) time.Time {
 
 func messageReplyIDsFromRawEvent(raw any) (threadID string, rootID string, parentID string) {
 	event, ok := raw.(*larkim.P2MessageReceiveV1)
-	if !ok || event.Event == nil || event.Event.Message == nil {
+	if ok && event.Event != nil && event.Event.Message != nil {
+		message := event.Event.Message
+		threadID = stringValue(message.ThreadId)
+		rootID = stringValue(message.RootId)
+		parentID = stringValue(message.ParentId)
+		if threadID != "" || rootID != "" || parentID != "" {
+			return threadID, rootID, parentID
+		}
+	}
+
+	rawMap := rawEventMap(raw)
+	if rawMap == nil {
 		return "", "", ""
 	}
-	message := event.Event.Message
-	return stringValue(message.ThreadId), stringValue(message.RootId), stringValue(message.ParentId)
+	return firstNestedRawString(rawMap,
+			[]string{"event", "message", "thread_id"},
+			[]string{"event", "message", "threadId"},
+			[]string{"message", "thread_id"},
+			[]string{"message", "threadId"},
+			[]string{"thread_id"},
+			[]string{"threadId"}),
+		firstNestedRawString(rawMap,
+			[]string{"event", "message", "root_id"},
+			[]string{"event", "message", "rootId"},
+			[]string{"message", "root_id"},
+			[]string{"message", "rootId"},
+			[]string{"root_id"},
+			[]string{"rootId"}),
+		firstNestedRawString(rawMap,
+			[]string{"event", "message", "parent_id"},
+			[]string{"event", "message", "parentId"},
+			[]string{"message", "parent_id"},
+			[]string{"message", "parentId"},
+			[]string{"parent_id"},
+			[]string{"parentId"})
+}
+
+func firstNestedRawString(input map[string]any, paths ...[]string) string {
+	for _, path := range paths {
+		value, ok := nestedRawValue(input, path...)
+		if !ok {
+			continue
+		}
+		if str, ok := value.(string); ok {
+			return str
+		}
+	}
+	return ""
 }
 
 func stringValue(value *string) string {
