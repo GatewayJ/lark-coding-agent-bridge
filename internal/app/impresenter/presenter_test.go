@@ -3,6 +3,7 @@ package impresenter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -234,6 +235,43 @@ func TestPresentMarkdownModeStreamsThrottledUpdates(t *testing.T) {
 	}
 }
 
+func TestPresentMarkdownModeRollsOverSilentlyAtUpdateLimit(t *testing.T) {
+	ch := &fakeChannel{}
+	run := delayedRun{
+		{event: textEvent("first")},
+		{after: 5 * time.Millisecond, event: textEvent(" second")},
+		{after: 5 * time.Millisecond, event: textEvent(" third")},
+		{event: agentport.AgentEvent{Type: agentport.EventDone}},
+	}
+
+	_, err := Present(context.Background(), Input{
+		Run:               run,
+		Channel:           ch,
+		ChatID:            "oc_chat",
+		ReplyMode:         ReplyMarkdown,
+		StreamThrottle:    time.Millisecond,
+		MaxMessageUpdates: 1,
+	})
+	if err != nil {
+		t.Fatalf("Present returned error: %v", err)
+	}
+	if len(ch.messages) != 2 {
+		t.Fatalf("messages = %#v, want initial message plus silent rollover", ch.messages)
+	}
+	if !strings.Contains(ch.messages[1].Content.Markdown, "first second third") {
+		t.Fatalf("rollover message = %#v, want complete current content", ch.messages[1])
+	}
+	if strings.Contains(ch.messages[1].Content.Markdown, "过程将在下一条消息继续") {
+		t.Fatalf("rollover message exposed continuation notice: %#v", ch.messages[1])
+	}
+	if len(ch.messageUpdates) != 2 {
+		t.Fatalf("message updates = %#v, want one update per message", ch.messageUpdates)
+	}
+	if ch.messageUpdates[0].MessageID != "message-1" || ch.messageUpdates[1].MessageID != "message-2" {
+		t.Fatalf("message update ids = %#v", ch.messageUpdates)
+	}
+}
+
 func TestPresentMarkdownModeFallsBackToNewMessageWhenFinalUpdateFails(t *testing.T) {
 	ch := &fakeChannel{messageUpdateErr: errors.New("patch denied")}
 	run := fakeRun([]agentport.AgentEvent{
@@ -449,7 +487,7 @@ type fakeChannel struct {
 
 func (c *fakeChannel) SendMessage(_ context.Context, req SendMessageRequest) (SendMessageResult, error) {
 	c.messages = append(c.messages, req)
-	return SendMessageResult{MessageID: "message-1"}, nil
+	return SendMessageResult{MessageID: fmt.Sprintf("message-%d", len(c.messages))}, nil
 }
 
 func (c *fakeChannel) SendCard(_ context.Context, req SendCardRequest) (SendCardResult, error) {

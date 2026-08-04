@@ -18,8 +18,11 @@ const (
 	ReplyCard     ReplyMode = "card"
 )
 
-const defaultStreamThrottle = 400 * time.Millisecond
-const defaultIdleStopTimeout = 5 * time.Second
+const (
+	defaultStreamThrottle    = 400 * time.Millisecond
+	defaultIdleStopTimeout   = 5 * time.Second
+	defaultMaxMessageUpdates = 18 // Keep headroom below Feishu's 20-edit limit.
+)
 
 type SendOptions struct {
 	ReplyTo       string
@@ -86,25 +89,27 @@ type RunStopper interface {
 }
 
 type Input struct {
-	Run             Run
-	Channel         Channel
-	ChatID          string
-	Options         SendOptions
-	ReplyMode       ReplyMode
-	RenderOptions   cardrender.RenderOptions
-	StartedAt       time.Time
-	StreamThrottle  time.Duration
-	HideToolCalls   bool
-	IdleTimeout     time.Duration
-	DeferUntilDone  bool
-	FinalAnswerOnly bool
-	BeforeFinal     func(context.Context, cardrender.RunState) error
+	Run               Run
+	Channel           Channel
+	ChatID            string
+	Options           SendOptions
+	ReplyMode         ReplyMode
+	RenderOptions     cardrender.RenderOptions
+	StartedAt         time.Time
+	StreamThrottle    time.Duration
+	MaxMessageUpdates int
+	HideToolCalls     bool
+	IdleTimeout       time.Duration
+	DeferUntilDone    bool
+	FinalAnswerOnly   bool
+	BeforeFinal       func(context.Context, cardrender.RunState) error
 }
 
 func Present(ctx context.Context, input Input) (cardrender.RunState, error) {
 	state := cardrender.NewRunState(cardrender.RunStateInput{StartedAt: input.StartedAt})
 	var cardMessageID string
 	var markdownMessageID string
+	var markdownUpdateCount int
 	var markdownUpdateFailed bool
 	lastCardUpdate := time.Time{}
 	lastMarkdownUpdate := time.Time{}
@@ -169,9 +174,10 @@ func Present(ctx context.Context, input Input) (cardrender.RunState, error) {
 					}
 				}
 				if !input.DeferUntilDone && !markdownUpdateFailed && shouldStreamMarkdownUpdate(input, markdownMessageID, lastMarkdownUpdate, state) {
-					messageID, err := streamMarkdown(ctx, input, state, markdownMessageID)
+					messageID, updateCount, err := streamMarkdown(ctx, input, state, markdownMessageID, markdownUpdateCount)
 					if err == nil {
 						markdownMessageID = messageID
+						markdownUpdateCount = updateCount
 						lastMarkdownUpdate = time.Now()
 					} else if markdownMessageID != "" {
 						markdownUpdateFailed = true
@@ -197,7 +203,7 @@ func Present(ctx context.Context, input Input) (cardrender.RunState, error) {
 			return state, err
 		}
 	}
-	return state, sendFinal(ctx, input, state, cardMessageID, markdownMessageID, markdownUpdateFailed)
+	return state, sendFinal(ctx, input, state, cardMessageID, markdownMessageID, markdownUpdateCount, markdownUpdateFailed)
 }
 
 func trackToolFlight(inFlight map[string]struct{}, event agentport.AgentEvent) {
@@ -270,7 +276,7 @@ func shouldStreamMarkdownUpdate(input Input, messageID string, lastUpdate time.T
 	return time.Since(lastUpdate) >= streamThrottle(input.StreamThrottle)
 }
 
-func sendFinal(ctx context.Context, input Input, state cardrender.RunState, cardMessageID string, markdownMessageID string, markdownUpdateFailed bool) error {
+func sendFinal(ctx context.Context, input Input, state cardrender.RunState, cardMessageID string, markdownMessageID string, markdownUpdateCount int, markdownUpdateFailed bool) error {
 	if input.Channel == nil {
 		return nil
 	}
@@ -289,7 +295,7 @@ func sendFinal(ctx context.Context, input Input, state cardrender.RunState, card
 			return err
 		}
 		if _, ok := input.Channel.(MessageUpdater); ok {
-			_, err := streamMarkdown(ctx, input, state, markdownMessageID)
+			_, _, err := streamMarkdown(ctx, input, state, markdownMessageID, markdownUpdateCount)
 			if err == nil {
 				return nil
 			}
@@ -326,12 +332,12 @@ func updateRunCard(ctx context.Context, input Input, state cardrender.RunState, 
 	})
 }
 
-func streamMarkdown(ctx context.Context, input Input, state cardrender.RunState, messageID string) (string, error) {
+func streamMarkdown(ctx context.Context, input Input, state cardrender.RunState, messageID string, updateCount int) (string, int, error) {
 	body := renderRunMarkdown(input, state)
 	if strings.TrimSpace(body) == "" {
-		return messageID, nil
+		return messageID, updateCount, nil
 	}
-	if messageID == "" {
+	if messageID == "" || updateCount >= maxMessageUpdates(input.MaxMessageUpdates) {
 		result, err := input.Channel.SendMessage(ctx, SendMessageRequest{
 			ChatID: input.ChatID,
 			Content: MessageContent{
@@ -339,18 +345,25 @@ func streamMarkdown(ctx context.Context, input Input, state cardrender.RunState,
 			},
 			Options: input.Options,
 		})
-		return result.MessageID, err
+		if err != nil {
+			return messageID, updateCount, err
+		}
+		return result.MessageID, 0, nil
 	}
 	updater, ok := input.Channel.(MessageUpdater)
 	if !ok {
-		return messageID, nil
+		return messageID, updateCount, nil
 	}
-	return messageID, updater.UpdateMessage(ctx, UpdateMessageRequest{
+	err := updater.UpdateMessage(ctx, UpdateMessageRequest{
 		MessageID: messageID,
 		Content: MessageContent{
 			Markdown: body,
 		},
 	})
+	if err != nil {
+		return messageID, updateCount, err
+	}
+	return messageID, updateCount + 1, nil
 }
 
 func sendCard(ctx context.Context, input Input, state cardrender.RunState) (SendCardResult, error) {
@@ -422,6 +435,13 @@ func streamThrottle(delay time.Duration) time.Duration {
 		return defaultStreamThrottle
 	}
 	return delay
+}
+
+func maxMessageUpdates(limit int) int {
+	if limit <= 0 {
+		return defaultMaxMessageUpdates
+	}
+	return limit
 }
 
 func toCardEvent(event agentport.AgentEvent) cardrender.Event {
