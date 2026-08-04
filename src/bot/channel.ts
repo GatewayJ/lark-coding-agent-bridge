@@ -6,11 +6,13 @@ import type {
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
+import { modelLabel, normalizeModelSelection, resolveModelArg } from '../agent/models';
 import {
   buildAgentPrompt,
   type BridgePromptInteractiveCard,
   type BridgePromptMention,
   type BridgePromptQuotedMessage,
+  type BridgePromptTopicMessage,
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
@@ -59,7 +61,8 @@ import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
-import { fetchQuotedContext, type QuotedContext } from './quote';
+import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
+import { lookupMessageThreadId } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
@@ -203,6 +206,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       })
     : undefined;
   const activePolicyFingerprints = new Map<string, string>();
+  // Per-scope record of the model used on the last run, so a `/config` model
+  // switch can inject a one-time "model changed" note into the next (resumed)
+  // prompt. In-memory only: on restart the first run re-seeds silently.
+  const lastRunModelByScope = new Map<string, string>();
   const cotClient = new CotClient({
     tenant: cfg.accounts.app.tenant,
     appId: cfg.accounts.app.id,
@@ -307,6 +314,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           cotClient,
           callbackAuth,
           activePolicyFingerprints,
+          lastRunModelByScope,
           scope,
           mode,
         });
@@ -564,27 +572,48 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
   const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
+  // Feishu delivers a sizable fraction of topic-group message events without a
+  // `thread_id` (notably the message that opens a new topic). We route topic
+  // replies (`replyInThread`) and isolate per-topic session scope off it, so a
+  // missing one makes the reply escape into a brand-new topic AND collapses the
+  // scope to the chat level. When getChatMode says this is a topic group but
+  // the event dropped `thread_id`, backfill it from the raw message — the same
+  // recovery the card-click path uses.
+  let threadId = msg.threadId;
+  if (!threadId && resolvedMode === 'topic') {
+    threadId = await lookupMessageThreadId(channel, msg.messageId);
+    if (threadId) {
+      log.info('intake', 'thread-id-backfilled', {
+        chatId: msg.chatId,
+        msgId: msg.messageId,
+        threadId,
+      });
+    }
+  }
+  // Carry the (possibly backfilled) threadId on the message so the batched
+  // flush — which reads `firstMsg.threadId` for reply routing and CoT — sees it.
+  const emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
   // Some groups are converted into topic groups after creation. In that state
   // getChatMode can lag behind the message event shape, so threadId is the
   // stronger signal for topic-scoped sessions and reply routing.
-  const chatMode = msg.threadId ? 'topic' : resolvedMode;
-  if (msg.threadId && resolvedMode !== 'topic') {
+  const chatMode = threadId ? 'topic' : resolvedMode;
+  if (threadId && resolvedMode !== 'topic') {
     chatModeCache.invalidate(msg.chatId);
     logThreadModeOverride({
       chatId: msg.chatId,
       resolvedMode,
-      threadId: msg.threadId,
+      threadId,
     });
   }
-  const scope = chatMode === 'topic' && msg.threadId
-    ? `${msg.chatId}:${msg.threadId}`
+  const scope = chatMode === 'topic' && threadId
+    ? `${msg.chatId}:${threadId}`
     : msg.chatId;
   log.info('intake', 'enter', {
     scope,
     chatType: msg.chatType,
     chatMode,
     resolvedMode,
-    threadId: msg.threadId,
+    threadId,
     msgId: msg.messageId,
     sender: msg.senderId,
     preview,
@@ -626,7 +655,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
 
   const handled = await tryHandleCommand({
     channel,
-    msg,
+    msg: emsg,
     scope,
     chatMode,
     sessions,
@@ -635,7 +664,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     activeRuns,
     sessionCatalog,
     sessionCatalogIdentity: await commandSessionCatalogIdentity({
-      msg,
+      msg: emsg,
       scope,
       mode: chatMode,
       workspaces,
@@ -652,7 +681,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  const size = pending.push(scope, msg);
+  const size = pending.push(scope, emsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
 }
 
@@ -668,6 +697,7 @@ interface RunBatchDeps {
   cotClient: CotClient;
   callbackAuth?: CallbackAuth;
   activePolicyFingerprints: Map<string, string>;
+  lastRunModelByScope: Map<string, string>;
   scope: string;
   mode: ChatMode;
 }
@@ -685,6 +715,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     cotClient,
     callbackAuth,
     activePolicyFingerprints,
+    lastRunModelByScope,
     scope,
     mode,
   } = deps;
@@ -738,8 +769,63 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
-  const prompt = buildPrompt(batch, attachments, quotes, channel.botIdentity);
-  log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
+  // Topic upstream context. When the bot is pulled into a topic for the FIRST
+  // time (no session yet for this scope), the topic's earlier messages — the
+  // root question that may never have @-mentioned the bot, plus prior replies —
+  // live nowhere the agent can see them. Fetch them so it isn't blind to what
+  // the user is pointing at. An already-engaged topic keeps that history in its
+  // resumed session, so we skip the fetch there.
+  let topicContext: QuotedContext[] = [];
+  if (mode === 'topic' && threadId && !sessions.getRaw(scope)) {
+    const exclude = new Set([...batchIds, ...quoteTargets]);
+    topicContext = await fetchTopicContext(channel, threadId, {
+      maxMessages: 40,
+      excludeIds: exclude,
+    });
+    if (topicContext.length > 0) {
+      log.info('topic', 'context-fetched', {
+        scope,
+        threadId,
+        count: topicContext.length,
+      });
+    }
+  }
+
+  // Detect a model switch since this scope's last run. When resuming an
+  // existing conversation the transcript still claims the old model, so tell
+  // the (now-switched) agent its model changed — otherwise it keeps echoing
+  // the previously-announced model. Only fires when a prior model was seen
+  // for this scope (never on the first run) and the selection actually
+  // changed. `requestedModel` (the `--model` value, or undefined for default)
+  // is reused below to log requested-vs-actual against the init event.
+  const agentKind = controls.profileConfig.agentKind;
+  const modelPref = controls.profileConfig.preferences.model;
+  const modelSelection = normalizeModelSelection(agentKind, modelPref);
+  const requestedModel = resolveModelArg(agentKind, modelPref);
+  const prevModel = lastRunModelByScope.get(scope);
+  const modelSwitched = prevModel !== undefined && prevModel !== modelSelection;
+  lastRunModelByScope.set(scope, modelSelection);
+  const extraInstructions = modelSwitched
+    ? [
+        `用户刚把本会话使用的模型切换为「${modelLabel(agentKind, modelPref)}」。` +
+          '之前的对话里可能提到别的模型,请以当前模型为准;若被问到你用的是什么模型,据此回答。',
+      ]
+    : undefined;
+
+  const prompt = buildPrompt(
+    batch,
+    attachments,
+    quotes,
+    topicContext,
+    channel.botIdentity,
+    extraInstructions,
+  );
+  log.info('prompt', 'built', {
+    promptChars: prompt.length,
+    quotes: quotes.length,
+    topicContext: topicContext.length,
+    ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
+  });
 
   // For topic groups: thread the reply so it lands in the same topic as the
   // user's message. Otherwise the SDK posts at top level and the user's
@@ -824,6 +910,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (evt.type === 'system' && evt.sessionId) {
       log.info('session', 'set', { sessionId: evt.sessionId });
     }
+    // Ground truth for "which model is actually running": claude reports the
+    // model it loaded in its init event. Logging requested-vs-actual reveals
+    // whether the --model pin took effect or claude silently fell back (e.g.
+    // an id this claude build/account doesn't recognize).
+    if (evt.type === 'system' && evt.model) {
+      log.info('session', 'model', {
+        requested: requestedModel ?? 'default',
+        actual: evt.model,
+      });
+    }
     if (evt.type === 'system' && evt.threadId) {
       log.info('session', 'set-thread', { threadId: evt.threadId });
     }
@@ -880,6 +976,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const cotPublisher = new CotPublisher({
         client: cotClient,
         chatId,
+        // Mirror sendOpts.replyInThread: in topic groups the CoT bubble must be
+        // addressed to the thread so it lands inside the topic, not at the
+        // group top level.
+        ...(mode === 'topic' && threadId ? { threadId } : {}),
         originMessageId: lastMsg.messageId,
         runId: execution.runId,
         scope,
@@ -1313,6 +1413,7 @@ async function awaitRenderAwareStream(input: {
       mode: input.mode,
       graceMs: STREAM_TERMINAL_GRACE_MS,
     });
+    await runFallbackReply(input.mode, first.state, input.fallback);
     void streamResult.then((result) => {
       if (!result.ok) {
         log.fail('stream', result.err, { mode: input.mode, step: 'stream-terminal-late' });
@@ -1320,7 +1421,11 @@ async function awaitRenderAwareStream(input: {
     });
     return;
   }
-  if (!terminal.ok) throw terminal.err;
+  if (!terminal.ok) {
+    log.fail('stream', terminal.err, { mode: input.mode, step: 'stream-terminal' });
+    await runFallbackReply(input.mode, first.state, input.fallback);
+    return;
+  }
 }
 
 async function runFallbackReply(
@@ -1377,7 +1482,9 @@ function buildPrompt(
   batch: NormalizedMessage[],
   attachments: LocalAttachment[],
   quotes: QuotedContext[] = [],
+  topicContext: QuotedContext[] = [],
   botIdentity?: { openId: string; name?: string },
+  extraInstructions?: string[],
 ): string {
   const first = batch[0];
   if (!first) return '';
@@ -1417,8 +1524,12 @@ function buildPrompt(
       messageIds: batch.map((m) => m.messageId),
       source: 'im',
     },
-    instructions: BRIDGE_AGENT_INSTRUCTIONS,
+    instructions:
+      extraInstructions && extraInstructions.length > 0
+        ? [...BRIDGE_AGENT_INSTRUCTIONS, ...extraInstructions]
+        : BRIDGE_AGENT_INSTRUCTIONS,
     userInput: userPart,
+    ...(topicContext.length > 0 ? { topicContext: topicContext.map(toPromptTopicMessage) } : {}),
     quotedMessages: quotes.map(toPromptQuote),
     interactiveCards: batch.map(toPromptInteractiveCard).filter(isDefined),
     attachments: attachments.map(toPromptAttachment),
@@ -1500,6 +1611,18 @@ function toPromptQuote(q: QuotedContext): BridgePromptQuotedMessage {
     messageId: q.messageId,
     senderId: q.senderId,
     ...(q.senderName ? { senderName: q.senderName } : {}),
+    ...(q.createdAt ? { createdAt: q.createdAt } : {}),
+    rawContentType: q.rawContentType,
+    content: q.content,
+  };
+}
+
+function toPromptTopicMessage(q: QuotedContext): BridgePromptTopicMessage {
+  return {
+    messageId: q.messageId,
+    senderId: q.senderId,
+    ...(q.senderName ? { senderName: q.senderName } : {}),
+    ...(q.senderType ? { senderType: q.senderType } : {}),
     ...(q.createdAt ? { createdAt: q.createdAt } : {}),
     rawContentType: q.rawContentType,
     content: q.content,
